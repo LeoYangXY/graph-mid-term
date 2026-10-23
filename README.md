@@ -61,8 +61,8 @@ target is traversal / index construction, not the point query itself.
 
 | dataset | |Eb| | |V| | transformed |E| | Convert | k=2 | k=3 | k=4 | indexBuild+ |
 |---|---|---|---|---|---|---|---|---|
-| linux-kernel | 1,565,684 | 42,045 | 205,611 | 0.133 s | - | - | - | **19.26 s** |
-| epinions | 13,668,320 | 120,492 | 2,945,795 | 2.48 s | 1400 us | 5118 us | 9685 us | running |
+| linux-kernel | 1,565,684 | 42,045 | 205,611 | 0.133 s | - | - | - | **19.26 s** (avg label 102.6) |
+| epinions | 13,668,320 | 120,492 | 2,945,795 | 2.48 s | 1400 us | 5118 us | 9685 us | **7532.6 s (2 h 5 min)** |
 | twitter | 4,664,606 | 175,214 | 20,352,035 | 0.84 s | 371 us | 6099 us | 21289 us | - |
 
 Fidelity notes:
@@ -77,6 +77,9 @@ Fidelity notes:
 - datasets: the paper uses SNAP/KONECT graphs with synthesised power-law
   durations; those downloads are blocked here, so we use same-format CBSR
   temporal bipartite graphs (twitter, epinions, linux-kernel).
+- indexBuild+ on epinions produced 985.9M entries (avg label 8182 per vertex).
+  That is far larger than the paper's index would be, and is a direct
+  consequence of the missing combined-dominance pass below, not of the data.
 
 ## 4. GPU kernel
 
