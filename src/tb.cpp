@@ -1,6 +1,7 @@
 #include "tb.h"
 #define P(...) do { printf(__VA_ARGS__); putchar(10); } while (0)
 static const u32 INF = 0x7fffffffu;
+static u64 g_evisit = 0;
 
 static std::vector<u32> gs;
 
@@ -118,6 +119,7 @@ static bool one_query(const CSR& c, u32 s, u32 t, u32 ta, u32 tb, u32 k,
     nf.clear();
     for (u32 v : fr) {
       u32 bv = best[v];
+      g_evisit += c.off[v + 1] - c.off[v];
       for (u32 p = c.off[v]; p < c.off[v + 1]; p++) {
         if (bv > c.b[p]) continue;
         u32 y = c.dst[p];
@@ -163,6 +165,8 @@ static void do_online(const TGraph& t, const std::string& qfile, u32 k, int nq) 
   double el = now_s() - t0;
   P("[online] total %.4fs per-query %.1f us positive=%zu/%zu",
     el, el * 1e6 / qs.size(), pos, qs.size());
+  P("[online] edge-visits/query = %.0f   (%.3f%% of M=%llu)",
+    (double)g_evisit / qs.size(), 100.0 * (double)g_evisit / qs.size() / (double)c.m, (unsigned long long)c.m);
 }
 
 static void do_batch(const TGraph& t, u32 S, u32 k, u32 ta, u32 tb, int nthreads) {

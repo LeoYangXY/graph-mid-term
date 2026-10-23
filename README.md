@@ -162,6 +162,46 @@ not latency-bound -- it is purely DRAM-bound. No kernel-level headroom left.
 Speedup 4.25x for a 10.8x peak-bandwidth ratio -- the laptop was already at 88% of
 its roofline, the H20 only reaches ~50-70%. H20 leaves more absolute headroom.
 
+
+### how much does pruning actually save? (instrumented, H20, 1 thread)
+
+| k | edge-visits per query | pct of M (21.0M) | per query |
+|---|---|---|---|
+| 2 | 250,898 | 1.19% | 0.600 ms |
+| 3 | 4,592,497 | 21.83% | 10.76 ms |
+| 4 | 11,890,220 | 56.51% | 30.27 ms |
+
+This kills the frontier idea: pruning is only dramatic at k=2 (84x less work).
+The transformed graph has average out-degree ~120, so by k=3 a single source
+already touches 22% of all contacts and by k=4 57%.
+
+Worse, **batching destroys the pruning advantage**. A single source touches 22% of
+M at k=3, but the union frontier of S=1024 sources covers ~70% of the graph already
+at hop 1 (1024 x 120 = 123k vertices out of 175k). So union-frontier ~= dense.
+Pruning helps only for few sources + small k; feeding a GPU needs many sources.
+The two requirements are directly opposed.
+
+## Is the reference work parallel? (checked)
+
+- IP&M 2025 (the target paper): no mention of parallelism / threads / concurrency
+  anywhere in abstract, highlights or contributions. Serial algorithm + serial timing.
+- CBSR (open reference, full text + code available): the word parallel appears once
+  in the whole paper, inside the machine spec (Xeon Platinum 8358, 32 cores / 64
+  threads) -- they report the core count but never use it. Its CMake sets
+  -fopenmp, but the only `#pragma omp parallel for` are 4 sites in
+  `src/partition.cpp` (graph partitioning); index construction and query
+  are serial.
+
+So the field convention is **serial CPU, single-threaded timing**. That matters for
+how the speedup is reported:
+
+| comparison | GPU per query | CPU per query | speedup |
+|---|---|---|---|
+| vs. the papers convention (1 thread) | 0.266 ms | 11.0 ms | **41x** |
+| vs. our own 64-process CPU baseline | 0.266 ms | 0.664 ms | **2.5x** |
+
+Both numbers are real; the paper must state which baseline is being compared.
+
 ## Verdict
 
 The dense batched relaxation buys only **2-2.5x on H20** (vs the best CPU baseline)
