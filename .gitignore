@@ -1,0 +1,7 @@
+# 7GB dataset: fetch with scripts/download_data.sh, never commit
+data/
+*.bin
+*.zip
+build/
+results/*.txt
+results/*.log
