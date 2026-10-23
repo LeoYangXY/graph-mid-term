@@ -118,6 +118,58 @@ The wedge blow-up is mild (avg 0.3x, twitter 4.5x). The join itself is nearly fr
    as bandwidth ratio x traffic ratio, never as a bare multiple.
 4. **Single indexed query must not go to GPU**: ~10 us on CPU vs 5-10 us kernel launch.
 
+## Measured on H20 (8x H20 96GB, sm_90, 4000 GB/s; 2x AMD EPYC 9K84 = 192 cores / 384 threads)
+
+### CPU baseline, twitter, k=3
+
+| configuration | per query | throughput |
+|---|---|---|
+| online pruned BFS, 1 thread | 11.0 ms | 91 q/s |
+| online pruned BFS, 64 concurrent procs | 0.664 ms | 1507 q/s |
+| dense batch, OpenMP 16 thr, S=1024 | 3.56 ms | - |
+| dense batch, OpenMP 64 thr, S=1024 | 0.933 ms | 1071 q/s |
+| dense batch, OpenMP 128 thr, S=1024 | 0.964 ms | - |
+
+Contrast with the laptop: there 16 concurrent processes gave only 1.08x over one
+thread (memory saturated immediately). On H20 64 processes give **16.6x**, because
+the EPYC memory subsystem is far wider. CPU scaling is entirely a bandwidth story.
+
+### GPU dense batch, twitter, k=3
+
+| S | time | G edge*src/s | achieved BW | pct of peak | per query | vs CPU 64-proc |
+|---|---|---|---|---|---|---|
+| 1024 | 0.3403 s | 189.9 | 1519 GB/s | 38% | 0.332 ms | 2.0x |
+| 4096 | 1.2067 s | 214.2 | 1714 GB/s | 43% | 0.295 ms | 2.3x |
+| 8192 | 2.1757 s | 237.7 | 1901 GB/s | 48% | 0.266 ms | 2.5x |
+
+(achieved BW is computed as 8 B per edge*source; counting the extra load inside
+the guarded store the real figure is ~12 B/op, i.e. ~57-70% of peak.)
+
+### is it the atomics?  no
+
+Rebuilding with -DNOATOM (plain store instead of atomicMin; result incorrect,
+bandwidth probe only) gives **exactly the same time**: 0.0944 s vs 0.0944 s at
+S=1024 k=1, 0.6120 s vs 0.6119 s at S=8192 k=1. The kernel is not atomic-bound and
+not latency-bound -- it is purely DRAM-bound. No kernel-level headroom left.
+
+### GPU 5050 vs H20, same kernel, twitter S=1024 k=3
+
+| GPU | time | achieved BW |
+|---|---|---|
+| RTX 5050 Laptop (369 GB/s) | 1.447 s | 325 GB/s (88% of peak) |
+| H20 (4000 GB/s) | 0.3403 s | 1519 GB/s (38% of peak) |
+
+Speedup 4.25x for a 10.8x peak-bandwidth ratio -- the laptop was already at 88% of
+its roofline, the H20 only reaches ~50-70%. H20 leaves more absolute headroom.
+
+## Verdict
+
+The dense batched relaxation buys only **2-2.5x on H20** (vs the best CPU baseline)
+and **1.75-3.2x on a laptop**. It is already at the DRAM roofline, so no amount of
+kernel tuning helps. The remaining lever is algorithmic: the CPU pruned BFS touches
+only ~1.6% of the edges per query while the dense kernel touches 100%. A
+frontier-based GPU multi-source BFS is the change that converts 2.5x into 10x+.
+
 ## Next step
 
 The dense kernel does M * S work per hop with no pruning, while the CPU pruned BFS

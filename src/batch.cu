@@ -27,8 +27,12 @@ __global__ void relaxk(const u32* __restrict__ xs, const u32* __restrict__ ys,
   u32 u = cur[(long long)x * (Smask + 1) + s];
   if (u <= b) {
     u32 v = u > a ? u : a;
+#ifdef NOATOM
+    nxt[(long long)y * (Smask + 1) + s] = v;
+#else
     u32* p = &nxt[(long long)y * (Smask + 1) + s];
     if (v < *p) atomicMin(p, v);
+#endif
   }
 }
 
