@@ -126,7 +126,7 @@ which is the only complete one:
 | linux-kernel | **19.33 s** | **47.76 s** | **49,981.5 s (13.9 h)** | **2586x** | **1046x** |
 | wikiquote_pl | 0.49 s | 0.99 s | 1.16 s | 2.4x | 1.17x |
 
-The faithful run was verified complete: ' + BT + 'cmp' + BT + ' reports both=1211,
+The faithful run was verified complete: cmp reports both=1211,
 index-only=0, online-only=0, i.e. it answers exactly what exact BFS answers.
 So on linux-kernel the GPU builds a 94%-complete index in 47.76 s versus 13.9 h
 for a 100%-complete one, and both are sound.
@@ -161,8 +161,9 @@ wikiquote it answers exactly the 1084 queries that exact BFS answers, no more an
 no fewer. The merged variant answers only 417. So:
 
 - comparing the GPU against the **merged** baseline is unfair in the GPU favour
-- against the **faithful** baseline the GPU is much faster, but we have only been
-  able to run the faithful baseline on the smallest graph
+- against the **faithful** baseline the GPU is 1046x faster on linux-kernel
+  (47.76 s vs 13.9 h) and about equal on wikiquote_pl, where the graph is too
+  small for the GPU
 
 ### Why bounded slots cannot reach 100%
 
