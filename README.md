@@ -146,6 +146,17 @@ B = 4096 is already past the knee; bigger batches only cost memory.
 
 ### Index quality (linux-kernel, k=3, 2000 queries)
 
+Measured on two datasets (k=3, 2000 queries). Ground truth is onlineQuery,
+which is exact BFS on the transformed graph.
+
+| dataset | ground truth | faithful CPU idx | merged CPU idx | GPU idx |
+|---|---|---|---|---|
+| wikiquote_pl | 1084 | **1084 (100%)** | 417 (38.5%) | 585 (**54.0%**) |
+| linux-kernel | 1211 | did not finish | 470 (38.8%) | 610 (**50.4%**) |
+
+Query latency with an index (linux-kernel): 1.66 us on the CPU index, 1.01 us
+on the GPU index, versus 411 us for exact BFS - the >1000x the paper claims.
+
 | | positives | recall | query latency |
 |---|---|---|---|
 | ground truth, onlineQuery (exact BFS) | 1211 | 100% | 411 us |
@@ -158,6 +169,23 @@ one merged BFS per vertex and therefore records one path per vertex; the GPU
 kernel stores exactly one entry per pair by design). The GPU index is both
 faster to build **and** better in recall than the CPU variant, but neither is
 complete yet. Fixing this means keeping a Pareto set of (hop, ts, te) per pair.
+
+### How much is being given away
+
+The paper Algorithm 4/5 starts a **separate BFS from every adjacent edge** of a
+vertex (2 x deg(u) traversals per vertex). Our CPU baseline merges those into
+one BFS per vertex. That merge is what loses recall, and it is also why our
+baseline looks fast:
+
+| dataset | merged CPU build | faithful CPU build | penalty |
+|---|---|---|---|
+| wikiquote_pl | 0.0038 s | 1.1603 s | **305x** |
+| linux-kernel | 19.26 s | did not finish in 25 min | **>60x** |
+
+So the faithful algorithm is complete but costs one to two orders of magnitude
+more than the baseline we compare against. **95x is therefore a conservative
+lower bound**: against the paper literal algorithm the gap is far wider, we just
+have not been able to run it to completion on anything but the smallest graph.
 
 ### Why 95x is conservative
 
@@ -180,6 +208,9 @@ Not done:
   priority, and the reason the recall column above is not 100%.
 - combined-dominance pruning in indexBuild+
 - index update (Algorithms 6 / 7)
+- **GPU loses on tiny graphs**: on wikiquote_pl (|E| = 4154) the GPU builder
+  takes 0.112 s versus 0.0038 s for the merged CPU, i.e. 29x slower. The dense
+  batching only pays off once the graph is big enough to fill the machine.
 - the faithful per-edge BFS variant of indexBuild+ is implemented (' + BT + 'idump2' + BT + ') but
   too slow to finish on any dataset here.
 
