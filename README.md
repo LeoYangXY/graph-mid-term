@@ -1,270 +1,154 @@
 # GPU acceleration for k-hop reachability on temporal bipartite graphs
 
-Target paper: **Zhou, Wang, Tan, Du, Chen, Tang**, *Efficient processing of k-hop
-reachability queries on temporal bipartite graphs*, Information Processing &
-Management 62(5):104178, 2025 (Elsevier).
+Paper: **Zhou, Wang, Tan, Du, Chen, Tang**, *Efficient processing of k-hop
+reachability queries on temporal bipartite graphs*, IP&M 62(5):104178, 2025.
 
-Machine: **h20-230**, 8x H20 96GB (sm_90, 4000 GB/s peak), 2x AMD EPYC 9K84
-(192 cores / 384 threads), 2.2 TB RAM. All numbers below measured there.
+Machine: **h20-230**, 8x H20 96GB (sm_90, 4000 GB/s peak), 2x AMD EPYC 9K84.
+Everything below is measured there, single threaded on the CPU side (the paper
+never parallelises, so neither does the baseline).
 
-- `ALGO.md` - the paper algorithms explained from scratch (no graph-theory
-  background assumed). Start there if the algorithms are new to you.
-- `src/paper.cpp` - CPU baseline, faithful to the paper, **serial / single threaded**
-  (the paper never parallelises anything, so neither does the baseline).
-- `src/q.cu` - GPU kernel: batched k-hop temporal reachability.
+Files:
 
-## Build
+- `ALGO.md` - the paper algorithms explained from scratch
+- `src/paper.cpp` - CPU baseline (graphConvert / onlineQuery / indexBuild+)
+- `src/q.cu` - GPU batched k-hop query kernel
+- `src/ifront.cu` - GPU index builder
+
+## Build and run
 
 ```bash
+export TMPDIR=/data1/xuanyiyang/tmp      # /  is full on h20-230
 export PATH=/data1/xuanyiyang/cuda-13.0/bin:$PATH
-export LD_LIBRARY_PATH=/data1/xuanyiyang/cuda-13.0/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/data1/xuanyiyang/cuda-13.0/lib64
 g++  -O2 -o build/paper src/paper.cpp
-nvcc -O3 -arch=sm_90 -o build/qgpu src/q.cu
-```
+nvcc -O3 -arch=sm_90 -o build/qgpu  src/q.cu
+nvcc -O3 -arch=sm_90 -DPP=12 -o build/ifrt12 src/ifront.cu
 
-## Run
-
-```bash
-./build/paper convert data/bigraph/<ds>.txt  build/tg.bin
+./build/paper convert data/bigraph/<ds>.txt build/tg.bin
 ./build/paper build   data/bigraph/<ds>.txt
 ./build/paper online  build/tg.bin data/query/<ds>.query_.queryres_0 <k> <nq>
-./build/qgpu build/tg.bin data/query/<ds>.query_.queryres_0 <k> <S> <reps> <peakBW>
+./build/qgpu  build/tg.bin data/query/<ds>.query_.queryres_0 <k> <S> <reps> <peakBW>
+./build/ifrt12 build/tg.bin <B> <kmax> <out.idx>
+./build/paper iquery <idx> <tg.bin> <queryfile> <k> <nq>   # index-only answers
+./build/paper cmp    <idx> <tg.bin> <queryfile> <k> <nq>   # vs exact BFS
 ```
 
-## 1. What the paper does (short version)
+## 1. The paper in one paragraph
 
-wedge (two people at one place with overlapping time intervals) -> graphConvert:
-collapse the location layer, one contact edge per wedge -> TB2Hop index: offline
-labels `(w, t1, t2, k)` per vertex -> query = compare two labels, no
-traversal. Full walkthrough with examples in ALGO.md.
+A wedge is "two people at one place with overlapping time intervals".
+graphConvert collapses the location layer and emits one contact edge per wedge,
+which makes the false-negative problem disappear for a plain BFS. TB2Hop then
+precomputes labels `(w, t1, t2, k)` per vertex so a query is just a label
+comparison. Details and examples in ALGO.md.
 
-Baselines reproduced: `onlineQuery` (BFS on the transformed graph) and
-`indexBuild+` (index construction).
+The paper own Table 7: graph conversion costs 25-8241 ms, but **index
+construction costs up to 24 h (basic) and 13.4 h (optimised)**. Query answering
+with a finished index is already >1000x faster than BFS. So the GPU target is
+index construction, not the point query.
 
-## 2. Where the paper hurts (its own Table 7, ms)
+## 2. CPU baseline (serial)
 
-| dataset | Convert | indexBuild | indexBuild+ |
-|---|---|---|---|
-| ZH | 25 | 687,100 | 2,058 |
-| QU | 57 | 13,776,399 | 7,778 |
-| BO | 125 | 86,536,248 (24 h) | 80,487 |
-| BR brightkite | 286 | did not finish | 1,272,056 (21 min) |
-| GO gowalla | 151 | did not finish | 1,731,429 (29 min) |
-| FR | 8,241 | did not finish | 48,170,232 (13.4 h) |
-
-**Graph conversion is cheap (25-8241 ms). Index construction is the whole
-problem: up to 24 h (basic) and 13.4 h (optimised).** Query answering with the
-finished index is already >1000x faster than the online baselines, so the GPU
-target is traversal / index construction, not the point query itself.
-
-## 3. Reproduced CPU baseline (serial, H20)
-
-| dataset | |Eb| | |V| | transformed |E| | Convert | k=2 | k=3 | k=4 | indexBuild+ |
+| dataset | edges in | vertices | transformed | convert | online k=2 | k=3 | k=4 | indexBuild+ |
 |---|---|---|---|---|---|---|---|---|
-| linux-kernel | 1,565,684 | 42,045 | 205,611 | 0.133 s | - | - | - | **19.26 s** (avg label 102.6) |
-| epinions | 13,668,320 | 120,492 | 2,945,795 | 2.48 s | 1400 us | 5118 us | 9685 us | **7532.6 s (2 h 5 min)** |
+| linux-kernel | 1,565,684 | 42,045 | 205,611 | 0.133 s | - | - | - | 19.26 s |
+| epinions | 13,668,320 | 120,492 | 2,945,795 | 2.48 s | 1400 us | 5118 us | 9685 us | 7532.6 s |
 | twitter | 4,664,606 | 175,214 | 20,352,035 | 0.84 s | 371 us | 6099 us | 21289 us | - |
 
 Fidelity notes:
 
-- everything single threaded, matching the paper (no OpenMP anywhere)
-- `onlineQuery` is level synchronous and matches the GPU kernel exactly
-  (verified on wikiquote: 32/64 positives on both)
-- `indexBuild+` implements the short-interval-first / priority-queue variant
-  with simple dominance and order pruning, but **omits the combined-dominance
-  pass** (line 30 of Algorithm 4). Its index is therefore a superset: larger
-  labels (avg 102.6 on linux-kernel) and a build time that is a lower bound.
-- datasets: the paper uses SNAP/KONECT graphs with synthesised power-law
-  durations; those downloads are blocked here, so we use same-format CBSR
-  temporal bipartite graphs (twitter, epinions, linux-kernel).
-- indexBuild+ on epinions produced 985.9M entries (avg label 8182 per vertex).
-  That is far larger than the paper's index would be, and is a direct
-  consequence of the missing combined-dominance pass below, not of the data.
+- single threaded throughout, as in the paper
+- `onlineQuery` is level synchronous and matches the GPU query kernel exactly
+  (32/64 positives on both, wikiquote)
+- `indexBuild+` here merges the per-adjacent-edge BFS of Algorithm 4/5 into one
+  BFS per vertex. That merge is much cheaper but loses answers; see section 5.
+- the paper SNAP/KONECT datasets are unreachable from this network, so we use
+  same-format CBSR temporal bipartite graphs instead
 
-## 4. GPU kernel
+## 3. GPU batched query (src/q.cu)
 
-src/q.cu answers **S queries simultaneously**. State is `A[vertex * S + query]`
-so a warp covers 32 consecutive queries on the same contact edge -> fully
-coalesced. One relaxation round = one kernel over all contact edges; k rounds
-give k hops. atomicMin folds competing arrivals. Grid-stride loop so S is not
-limited by the grid dimension.
+S queries at once, state `A[vertex * S + query]`, one relaxation round per hop,
+atomicMin for competing arrivals, grid-stride loop.
 
-### Results (H20, best of 3 reps)
-
-| dataset | k | S | us/query | queries/s | achieved BW | vs CPU serial |
+| dataset | k | S | us/query | queries/s | achieved BW | vs serial CPU |
 |---|---|---|---|---|---|---|
-| twitter | 3 | 1024 | 393.5 | 2,542 | 2483 GB/s (62%) | **15.5x** |
-| twitter | 3 | 4096 | 442.6 | 2,259 | 2207 GB/s (55%) | 13.8x |
-| twitter | 3 | 16384 | 538.8 | 1,856 | 1813 GB/s (45%) | 11.3x |
-| twitter | 2 | 16384 | 299.2 | 3,342 | 2177 GB/s (54%) | 1.24x |
-| twitter | 4 | 16384 | 809.1 | 1,236 | 1610 GB/s (40%) | **26.3x** |
-| epinions | 3 | 1024 | 88.3 | 11,321 | 1601 GB/s (40%) | 58.0x |
-| epinions | 3 | 8192 | 73.2 | 13,659 | 1931 GB/s (48%) | **69.9x** |
-| epinions | 5 | 8192 | 145.2 | 6,887 | 1623 GB/s (41%) | - |
-| epinions | 6 | 8192 | 182.9 | 5,467 | 1546 GB/s (39%) | - |
+| twitter | 2 | 16384 | 299.2 | 3,342 | 54% of peak | 1.24x |
+| twitter | 3 | 1024 | 393.5 | 2,542 | 62% of peak | **15.5x** |
+| twitter | 4 | 16384 | 809.1 | 1,236 | 40% of peak | **26.3x** |
+| epinions | 3 | 8192 | 73.2 | 13,659 | 48% of peak | **69.9x** |
 
-How to read it:
+The kernel is at 40-62% of H20 peak bandwidth, i.e. DRAM bound and close to the
+roofline. The win grows with k: at k=2 a single pruned CPU BFS is already cheap,
+so batching only buys 1.24x.
 
-- **the win grows with k**. At k=2 a single pruned CPU BFS is already cheap, so
-  batching buys only 1.24x. At k=4 it buys 26x; on the sparser epinions graph,
-  70x.
-- the kernel runs at **40-62% of H20 peak bandwidth**: DRAM bound and close to
-  the roofline, so tuning headroom is small.
-- more batching does **not** keep helping: throughput peaks around S=1024-8192
-  then falls, because work is O(M x S) while memory pressure grows.
-- these are against the **serial** CPU baseline, which is what the paper
-  reports. If the CPU is allowed 64 processes the gap narrows sharply; that
-  number is in this repo git history and must be reported alongside.
+## 4. GPU index builder (src/ifront.cu)
 
-## 5. GPU index builder (src/ibuild.cu)
+One temporal BFS per vertex is batched: B vertices relaxed simultaneously. State
+per (vertex, source) is one u64:
 
-Index construction is the paper biggest cost. Its inner loop is "one temporal
-BFS per vertex, in both time directions". We batch **B vertices at a time** and
-relax them all simultaneously.
+```text
+bits 60..63  hop        bits 30..59  tsp = range-(ts-tmin)        bits 0..29  te-tmin
+(smaller tsp  ==  larger ts)
+```
 
-The whole design hinges on one trick: the state of a (vertex, source) pair is a
-**single u64**
+ts and te share one word, so a stored interval always belongs to one real path.
+PP slots per pair form a Pareto frontier, domination being
 
-    bits 60..63  hop
-    bits 30..59  ts' = range - (ts - tmin)      (minimising ts' = maximising ts)
-    bits  0..29  te' = te - tmin
+```text
+A dominates B  iff  A.hop <= B.hop  and  A.ts >= B.ts  and  A.te <= B.te
+```
 
-Because ts and te live in the same word, a stored interval always belongs to one
-real path, so the result stays sound, and one ' + BT + 'atomicMin' + BT + ' does the whole
-update: it minimises hop first, then maximises ts, then minimises te. 8 bytes
-per (vertex, source), fully coalesced, no locks.
+A dominated entry can never answer a query the dominating one cannot, so the
+frontier is sufficient. Slots use atomicCAS, no locks. All PP slots are expanded,
+because different frontier points at a vertex satisfy different outgoing edges.
 
-### Build time (H20, vs the serial CPU baseline)
+Layout is `S[(v*PP + p)*B + q]` so that consecutive queries inside a warp are
+contiguous (the earlier `[(v*B+q)*PP + p]` layout was not coalesced).
 
-| dataset | CPU serial | GPU | speedup | entries CPU | entries GPU |
-|---|---|---|---|---|---|
-| linux-kernel | 19.26 s | **3.68 s** (B=4096) | **5.2x** | 4,313,133 | 2,738,446 |
-| epinions | **7532.6 s (2 h 5 min)** | **79.3 s** (B=8192) | **95x** | 985,878,778 | 542,110,838 |
+### Results (verified sound: index-only = 0, i.e. no false positives)
 
-Batch size: linux-kernel 3.68 / 3.95 / 4.53 s at B = 4096 / 8192 / 16384, so
-B = 4096 is already past the knee; bigger batches only cost memory.
+| dataset | PP | GPU build | entries | correct | missed | recall |
+|---|---|---|---|---|---|---|
+| wikiquote_pl | 6 | 0.49 s | 15,952 | 936 | 148 | 86.3% |
+| wikiquote_pl | 12 | 0.99 s | 18,594 | 998 | 86 | 92.1% |
+| linux-kernel | 6 | 19.33 s | 9.54M | 1084 | 127 | 89.5% |
+| linux-kernel | 12 | 47.76 s | 13.28M | 1138 | 73 | 94.0% |
+| epinions | 6 | see below | - | - | - | - |
 
-### Index quality (linux-kernel, k=3, 2000 queries)
+"missed" is counted per query against exact BFS (`paper cmp`): a pure false
+negative, never a false positive.
 
-Measured on two datasets (k=3, 2000 queries). Ground truth is onlineQuery,
-which is exact BFS on the transformed graph.
+## 5. What the two CPU variants are worth
 
-| dataset | ground truth | faithful CPU idx | merged CPU idx | GPU idx |
+| dataset | merged build | faithful build (paper literal) | penalty | recall |
 |---|---|---|---|---|
-| wikiquote_pl | 1084 | **1084 (100%)** | 417 (38.5%) | 585 (**54.0%**) |
-| linux-kernel | 1211 | did not finish | 470 (38.8%) | 610 (**50.4%**) |
+| wikiquote_pl | 0.0038 s | 1.1603 s | 305x | 38.5% vs **100%** |
+| linux-kernel | 19.26 s | did not finish in 25 min | >60x | 38.8% vs - |
 
-Query latency with an index (linux-kernel): 1.66 us on the CPU index, 1.01 us
-on the GPU index, versus 411 us for exact BFS - the >1000x the paper claims.
+The faithful algorithm (a separate BFS from every adjacent edge) is complete: on
+wikiquote it answers exactly the 1084 queries that exact BFS answers, no more and
+no fewer. The merged variant answers only 417. So:
 
-| | positives | recall | query latency |
-|---|---|---|---|
-| ground truth, onlineQuery (exact BFS) | 1211 | 100% | 411 us |
-| CPU index | 470 | 38.8% | 1.66 us |
-| **GPU index** | **610** | **50.4%** | **1.01 us** |
+- comparing the GPU against the **merged** baseline is unfair in the GPU favour
+- against the **faithful** baseline the GPU is much faster, but we have only been
+  able to run the faithful baseline on the smallest graph
 
-Both indices here are incomplete and this is the honest weak point of the
-current code: they keep too few entries per vertex pair (the CPU variant does
-one merged BFS per vertex and therefore records one path per vertex; the GPU
-kernel stores exactly one entry per pair by design). The GPU index is both
-faster to build **and** better in recall than the CPU variant, but neither is
-complete yet. Fixing this means keeping a Pareto set of (hop, ts, te) per pair.
+### Why bounded slots cannot reach 100%
 
-### How much is being given away
+Pareto-filtering the faithful index changes nothing: 22,683 entries before,
+22,683 after, up to 240 per pair. With three objectives (hop, ts, te) almost
+nothing dominates anything, so the frontier is the whole set. A bounded number of
+slots therefore always loses a few percent. This is a property of the problem.
 
-The paper Algorithm 4/5 starts a **separate BFS from every adjacent edge** of a
-vertex (2 x deg(u) traversals per vertex). Our CPU baseline merges those into
-one BFS per vertex. That merge is what loses recall, and it is also why our
-baseline looks fast:
+## 6. Known limits
 
-| dataset | merged CPU build | faithful CPU build | penalty |
-|---|---|---|---|
-| wikiquote_pl | 0.0038 s | 1.1603 s | **305x** |
-| linux-kernel | 19.26 s | did not finish in 25 min | **>60x** |
-
-So the faithful algorithm is complete but costs one to two orders of magnitude
-more than the baseline we compare against. **95x is therefore a conservative
-lower bound**: against the paper literal algorithm the gap is far wider, we just
-have not been able to run it to completion on anything but the smallest graph.
-
-### Why 95x is conservative
-
-The paper Algorithm 4/5 starts a **separate BFS from every adjacent edge** of a
-vertex (2 x deg(u) traversals per vertex). Our CPU baseline merges those into
-one BFS per vertex, which is roughly deg(u) times cheaper. Running the faithful
-per-edge version on linux-kernel did not finish within the time budget - which
-is exactly why the paper needs 21 min on BR and 13.4 h on FR. So the true paper
-baseline is *slower* than the 7532.6 s we compare against, and the real GPU
-speedup is larger than 95x.
-
-## 6. Making the index complete: Pareto frontier per pair
-
-The single-entry index caps recall near 50%. The reason is that one entry per
-vertex pair is not enough. Entry ' + BT + '(w, t1, t2, k)' + BT + ' answers a query only when
-' + BT + '[t1,t2] is inside [ts,te]' + BT + ' and ' + BT + 'k <= k_query' + BT + ', so a pair needs entries with a
-LATE start (to satisfy t1 >= ts) and entries with an EARLY end (to satisfy
-t2 <= te), and those are usually different paths.
-
-src/ifront.cu keeps **PP entries per (vertex, source)**, maintained as a Pareto
-frontier. Domination is
-
-    A dominates B  iff  A.k <= B.k and A.t1 >= B.t1 and A.t2 <= B.t2
-
-and a dominated entry can never answer a query the dominating one cannot, so
-the frontier is a sufficient summary. Slots are updated with atomicCAS, no
-locks. All PP slots are also expanded, because different frontier points at a
-vertex satisfy different outgoing edges.
-
-### Recall vs PP (k=3, 2000 queries; ground truth = exact BFS)
-
-| PP | wikiquote_pl (truth 1084) | linux-kernel (truth 1211) |
-|---|---|---|
-| 1 (single entry) | 585 (54.0%) | 610 (50.4%) |
-| 6 | 929 (85.7%) | 1077 (88.9%) |
-| 12 | 1002 (92.4%) | 1134 (93.6%) |
-| 20 | 1035 (95.5%) | 1170 (**96.6%**) |
-| 32 | 1047 (96.6%) | - |
-| 48 | 1061 (**97.9%**) | - |
-| CPU merged baseline | 417 (38.5%) | 470 (38.8%) |
-| CPU faithful (paper literal) | **1084 (100%)** | - |
-
-### Why it cannot reach exactly 100% with bounded slots
-
-We Pareto-filtered the faithful CPU index: **22,683 entries before, 22,683
-after, max 240 entries per pair.** With three objectives (k, t1, t2) almost
-nothing dominates anything, so the frontier IS the whole set. A bounded number
-of slots therefore necessarily loses a few percent. This is a property of the
-problem, not of the implementation.
-
-### Cost of PP (linux-kernel, H20)
-
-| PP | GPU build | CPU merged | CPU faithful |
-|---|---|---|---|
-| 1 | 3.68 s | 19.26 s | did not finish in 25 min |
-| 6 | 25.07 s | 19.26 s | - |
-| 12 | 50.0 s | 19.26 s | - |
-| 20 | 83.4 s | 19.26 s | - |
-
-Read this carefully: against the *merged* CPU baseline the GPU now looks
-slower, because the merged baseline throws away more than half the answers. The
-fair comparison is GPU-with-frontier versus the *faithful* baseline, which is
-the only one that is complete, and that baseline is at least 60x slower than the
-merged one (305x on wikiquote_pl: 1.1603 s vs 0.0038 s).
-
-## 7. Honest status
-
-Done: algorithm write-up, faithful serial CPU baseline, GPU batched query
-kernel verified equal to the CPU on positives, measurement tables above.
-
-Not done:
-
-- **index completeness** (see 5): both indices miss reachable pairs. Highest
-  priority, and the reason the recall column above is not 100%.
-- combined-dominance pruning in indexBuild+
-- index update (Algorithms 6 / 7)
-- **GPU loses on tiny graphs**: on wikiquote_pl (|E| = 4154) the GPU builder
-  takes 0.112 s versus 0.0038 s for the merged CPU, i.e. 29x slower. The dense
-  batching only pays off once the graph is big enough to fill the machine.
-- the faithful per-edge BFS variant of indexBuild+ is implemented (' + BT + 'idump2' + BT + ') but
-  too slow to finish on any dataset here.
+- **GPU loses on tiny graphs**: on wikiquote_pl (4,154 edges) the GPU builder
+  takes 0.49 s versus 0.0038 s for the merged CPU. Dense batching only pays off
+  on graphs big enough to fill the machine.
+- index update (Algorithms 6 / 7) is not implemented.
+- the combined-dominance pass (Algorithm 4 line 30) is not implemented, so the
+  CPU baseline index is a superset.
+- speedups are against the **serial** CPU. Allowing the CPU 64 processes narrows
+  the gap a lot; that number is in the git history and must be reported too.
+- PP > 12 was tried (20, 32, 48) and keeps improving recall, at roughly linear
+  extra time and memory.
 

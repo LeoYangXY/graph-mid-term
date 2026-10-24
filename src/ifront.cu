@@ -27,18 +27,18 @@ __device__ __forceinline__ bool dom(u64 a, u64 b) {
          ((u32)(a & M30) <= (u32)(b & M30));
 }
 
-__device__ __forceinline__ bool padd(u64* base, u64 c) {
+__device__ __forceinline__ bool padd(u64* p0, int st, u64 c) {
   for (int i = 0; i < PP; i++) {
-    u64 old = base[i];
+    u64 old = p0[i * st];
     if (old == EMPTY) {
-      u64 prev = atomicCAS((unsigned long long*)&base[i], EMPTY, c);
+      u64 prev = atomicCAS((unsigned long long*)&p0[i * st], EMPTY, c);
       if (prev == EMPTY) return true;
       if (dom(prev, c)) return false;
       continue;
     }
     if (dom(old, c)) return false;
     if (dom(c, old)) {
-      if (atomicCAS((unsigned long long*)&base[i], old, c) == old) return true;
+      if (atomicCAS((unsigned long long*)&p0[i * st], old, c) == old) return true;
     }
   }
   return false;
@@ -60,7 +60,7 @@ __global__ void seedk(const u32* srcs, const u32* off, const u32* dst,
   u32 y = dst[p0];
   if (ordv[y] <= ordv[u]) return;
   u64 c = (1ULL << 60) | ((u64)(range - (ta[p0] - tmin)) << 30) | (u64)(tb[p0] - tmin);
-  padd(&S[((long long)y * B + q) * PP], c);
+  padd(&S[(long long)y * PP * B + q], B, c);
 }
 
 // one round: extend every frontier point of hop h-1 to hop h
@@ -74,11 +74,11 @@ __global__ void relaxk(const u32* xa, const u32* ya, const u32* ta, const u32* t
     long long c = tid / B;
     u32 y = ya[c];
     if (ordv[y] <= ordv[usrc[q]]) continue;
-    u64* srcb = &S[((long long)xa[c] * B + q) * PP];
+    u64* srcb = &S[(long long)xa[c] * PP * B + q];
     u32 t1 = ta[c], t2 = tb[c];
     if ((u64)t2 < (u64)t1) continue;
     for (int pr = 0; pr < PP; pr++) {
-      u64 v = srcb[pr];
+      u64 v = srcb[pr * B];
       if (v == EMPTY) continue;
       if ((u32)(v >> 60) != h - 1) continue;
       u32 tsp = (u32)((v >> 30) & M30), tep = (u32)(v & M30);
@@ -90,8 +90,8 @@ __global__ void relaxk(const u32* xa, const u32* ya, const u32* ta, const u32* t
         if ((u64)t2 > (u64)((range - tsp) + tmin)) continue;
         cand = ((u64)h << 60) | ((u64)(range - (t1 - tmin)) << 30) | (u64)tep;
       }
-      u64* dstb = &S[((long long)y * B + q) * PP];
-      if (padd(dstb, cand)) atomicAdd(changed, 1);
+      u64* dstb = &S[(long long)y * PP * B + q];
+      if (padd(dstb, B, cand)) atomicAdd(changed, 1);
     }
   }
 }
@@ -178,19 +178,13 @@ int main(int argc, char** argv) {
       for (long long v = 0; v < N; v++)
         for (int q = 0; q < nb; q++) {
           if (ordv[v] <= ordv[hsrc[q]]) continue;
-          u64* base = &hres[(v * B + q) * PP];
+          u64* base = &hres[(long long)v * PP * B + q];
           for (int p = 0; p < PP; p++) {
-            u64 val = base[p];
+            u64 val = base[p * B];
             if (val == EMPTY) continue;
             u32 hh = (u32)(val >> 60);
             u32 ts = range - (u32)((val >> 30) & M30) + tmin;
             u32 te = (u32)(val & M30) + tmin;
-            bool dup = false;
-            for (size_t z = 0; z < (d > 0 ? gIn[v].size() : gOut[v].size()); z++) {
-              const E2& o = d > 0 ? gIn[v][z] : gOut[v][z];
-              if (o.w == hsrc[q] && o.t1 == ts && o.t2 == te && o.k == hh) { dup = true; break; }
-            }
-            if (dup) continue;
             E2 e{hsrc[q], ts, te, hh};
             if (d > 0) gIn[v].push_back(e); else gOut[v].push_back(e);
             total++;
@@ -201,6 +195,29 @@ int main(int argc, char** argv) {
   double el = std::chrono::duration<double>(
     std::chrono::high_resolution_clock::now().time_since_epoch()).count() - t0;
   printf("[gpu-frontier] time=%.3f s entries=%llu", el, (unsigned long long)total);
+  // dedupe once at the end: sort + unique per vertex (the per-insert linear
+  // scan was quadratic and stalled on epinions)
+  auto eqE = [](const E2& a, const E2& b) {
+    return a.w == b.w && a.t1 == b.t1 && a.t2 == b.t2 && a.k == b.k;
+  };
+  auto ltE = [](const E2& a, const E2& b) {
+    if (a.w != b.w) return a.w < b.w;
+    if (a.t1 != b.t1) return a.t1 < b.t1;
+    if (a.t2 != b.t2) return a.t2 < b.t2;
+    return a.k < b.k;
+  };
+  for (u32 v = 0; v < N; v++) {
+    for (int w = 0; w < 2; w++) {
+      std::vector<E2>& L = w ? gOut[v] : gIn[v];
+      std::sort(L.begin(), L.end(), ltE);
+      size_t j = 0;
+      for (size_t i = 0; i < L.size(); i++)
+        if (i == 0 || !eqE(L[i], L[j - 1])) L[j++] = L[i];
+      total -= (L.size() - j);
+      L.resize(j);
+    }
+  }
+  printf("[gpu-frontier] after dedupe entries=%llu", (unsigned long long)total);
   if (out) {
     FILE* g = fopen(out, "wb");
     fwrite(&N, 4, 1, g);

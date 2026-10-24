@@ -1,21 +1,23 @@
-# GPU arch:  H20/A100/H100 -> sm_90    RTX 5050 laptop -> sm_120
-# usage:  make ARCH=sm_90
+# GPU arch:  H20 / A100 / H100 -> sm_90     RTX 5050 laptop -> sm_120
 ARCH ?= sm_90
+PP   ?= 12
 CXX  ?= g++
 NVCC ?= nvcc
-CXXFLAGS ?= -O3 -fopenmp
-NVFLAGS  ?= -O3 -arch=$(ARCH)
 BUILD = build
 
-all: $(BUILD)/tb $(BUILD)/batch_gpu
+all: $(BUILD)/paper $(BUILD)/qgpu $(BUILD)/ifrt$(PP)
 
-$(BUILD)/tb: src/tb.cpp src/tb.h
+$(BUILD)/paper: src/paper.cpp
 	mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -o $@ src/tb.cpp
+	$(CXX) -O2 -o $@ src/paper.cpp
 
-$(BUILD)/batch_gpu: src/batch.cu
+$(BUILD)/qgpu: src/q.cu
 	mkdir -p $(BUILD)
-	$(NVCC) $(NVFLAGS) -o $@ src/batch.cu
+	$(NVCC) -O3 -arch=$(ARCH) -o $@ src/q.cu
+
+$(BUILD)/ifrt$(PP): src/ifront.cu
+	mkdir -p $(BUILD)
+	$(NVCC) -O3 -arch=$(ARCH) -DPP=$(PP) -o $@ src/ifront.cu
 
 clean:
 	rm -rf $(BUILD)

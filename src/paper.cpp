@@ -506,6 +506,37 @@ int main(int argc, char** argv) {
     if (argc > 3) writeIdx(n, argv[3]);
     return 0;
   }
-  P("usage: paper convert|build|idump|analyze|pfilt|iquery|online <file> [args]");
+  if (mode == "cmp") {
+    u32 n = 0; readIdx(path.c_str(), n);
+    std::string tgf = argc > 3 ? argv[3] : "";
+    TG t = loadTG(tgf);
+    CSR c = build_csr(t);
+    std::vector<u32> qs, qt, qa, qb;
+    FILE* f = fopen(argv[4], "rb");
+    u32 a, b, s2, e2;
+    while (fscanf(f, "%u %u %u %u", &a, &b, &s2, &e2) == 4) {
+      qs.push_back(a); qt.push_back(b);
+      if (s2 <= e2) { qa.push_back(s2); qb.push_back(e2); } else { qa.push_back(e2); qb.push_back(s2); }
+    }
+    fclose(f);
+    u32 k = argc > 5 ? atoi(argv[5]) : 3;
+    int nq = argc > 6 ? atoi(argv[6]) : 0;
+    if (nq > 0 && nq < (int)qs.size()) { qs.resize(nq); qt.resize(nq); qa.resize(nq); qb.resize(nq); }
+    std::vector<u32> cur(t.n, NONE), nxt(t.n, NONE), fr, nf;
+    u64 both = 0, idxOnly = 0, onlOnly = 0;
+    for (size_t i = 0; i < qs.size(); i++) {
+      bool A = indexQuery(qs[i], qt[i], qa[i], qb[i], k);
+      bool B = onlineQuery(c, qs[i], qt[i], qa[i], qb[i], k, cur, nxt, fr, nf);
+      std::fill(cur.begin(), cur.end(), NONE);
+      if (A && B) both++;
+      else if (A && !B) idxOnly++;
+      else if (!A && B) onlOnly++;
+    }
+    P("[cmp] N=%u q=%zu k=%u  both=%llu  index-only=%llu  online-only=%llu",
+      n, qs.size(), k, (unsigned long long)both,
+      (unsigned long long)idxOnly, (unsigned long long)onlOnly);
+    return 0;
+  }
+  P("usage: paper convert|build|idump|analyze|pfilt|cmp|iquery|online <file> [args]");
   return 1;
 }
