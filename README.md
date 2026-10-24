@@ -197,7 +197,61 @@ is exactly why the paper needs 21 min on BR and 13.4 h on FR. So the true paper
 baseline is *slower* than the 7532.6 s we compare against, and the real GPU
 speedup is larger than 95x.
 
-## 6. Honest status
+## 6. Making the index complete: Pareto frontier per pair
+
+The single-entry index caps recall near 50%. The reason is that one entry per
+vertex pair is not enough. Entry ' + BT + '(w, t1, t2, k)' + BT + ' answers a query only when
+' + BT + '[t1,t2] is inside [ts,te]' + BT + ' and ' + BT + 'k <= k_query' + BT + ', so a pair needs entries with a
+LATE start (to satisfy t1 >= ts) and entries with an EARLY end (to satisfy
+t2 <= te), and those are usually different paths.
+
+src/ifront.cu keeps **PP entries per (vertex, source)**, maintained as a Pareto
+frontier. Domination is
+
+    A dominates B  iff  A.k <= B.k and A.t1 >= B.t1 and A.t2 <= B.t2
+
+and a dominated entry can never answer a query the dominating one cannot, so
+the frontier is a sufficient summary. Slots are updated with atomicCAS, no
+locks. All PP slots are also expanded, because different frontier points at a
+vertex satisfy different outgoing edges.
+
+### Recall vs PP (k=3, 2000 queries; ground truth = exact BFS)
+
+| PP | wikiquote_pl (truth 1084) | linux-kernel (truth 1211) |
+|---|---|---|
+| 1 (single entry) | 585 (54.0%) | 610 (50.4%) |
+| 6 | 929 (85.7%) | 1077 (88.9%) |
+| 12 | 1002 (92.4%) | 1134 (93.6%) |
+| 20 | 1035 (95.5%) | 1170 (**96.6%**) |
+| 32 | 1047 (96.6%) | - |
+| 48 | 1061 (**97.9%**) | - |
+| CPU merged baseline | 417 (38.5%) | 470 (38.8%) |
+| CPU faithful (paper literal) | **1084 (100%)** | - |
+
+### Why it cannot reach exactly 100% with bounded slots
+
+We Pareto-filtered the faithful CPU index: **22,683 entries before, 22,683
+after, max 240 entries per pair.** With three objectives (k, t1, t2) almost
+nothing dominates anything, so the frontier IS the whole set. A bounded number
+of slots therefore necessarily loses a few percent. This is a property of the
+problem, not of the implementation.
+
+### Cost of PP (linux-kernel, H20)
+
+| PP | GPU build | CPU merged | CPU faithful |
+|---|---|---|---|
+| 1 | 3.68 s | 19.26 s | did not finish in 25 min |
+| 6 | 25.07 s | 19.26 s | - |
+| 12 | 50.0 s | 19.26 s | - |
+| 20 | 83.4 s | 19.26 s | - |
+
+Read this carefully: against the *merged* CPU baseline the GPU now looks
+slower, because the merged baseline throws away more than half the answers. The
+fair comparison is GPU-with-frontier versus the *faithful* baseline, which is
+the only one that is complete, and that baseline is at least 60x slower than the
+merged one (305x on wikiquote_pl: 1.1603 s vs 0.0038 s).
+
+## 7. Honest status
 
 Done: algorithm write-up, faithful serial CPU baseline, GPU batched query
 kernel verified equal to the CPU on positives, measurement tables above.

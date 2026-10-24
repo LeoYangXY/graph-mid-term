@@ -418,6 +418,94 @@ int main(int argc, char** argv) {
       n, qs.size(), k, el, el * 1e6 / qs.size(), pos);
     return 0;
   }
-  P("usage: paper convert|build|idump|iquery|online <file> [args]");
+  if (mode == "analyze") {
+    u32 n = 0; readIdx(path.c_str(), n);
+    std::vector<u64> hist(32, 0);
+    u64 pairs = 0, maxe = 0;
+    for (u32 v = 0; v < n; v++) {
+      for (int which = 0; which < 2; which++) {
+        std::vector<Ent>& L = which ? Lout[v] : Lin[v];
+        std::sort(L.begin(), L.end(), [](const Ent& a, const Ent& b) {
+          if (a.w != b.w) return a.w < b.w;
+          if (a.k != b.k) return a.k < b.k;
+          if (a.t1 != b.t1) return a.t1 < b.t1;
+          return a.t2 < b.t2;
+        });
+        u64 run = 0; u32 pw = 0xffffffffu;
+        for (size_t i = 0; i <= L.size(); i++) {
+          if (i < L.size() && L[i].w == pw) { run++; continue; }
+          if (pw != 0xffffffffu) {
+            pairs++; if (run > maxe) maxe = run;
+            if (run < 32) hist[run]++; else hist[31]++;
+          }
+          if (i < L.size()) { pw = L[i].w; run = 1; }
+        }
+      }
+    }
+    P("[analyze] N=%u pairs-with-entries=%llu max-entries-per-pair=%llu", n,
+      (unsigned long long)pairs, (unsigned long long)maxe);
+    u64 acc = 0;
+    for (u32 i = 1; i < 32; i++) {
+      if (hist[i] == 0) continue;
+      acc += hist[i];
+      P("  entries/pair=%u : %llu pairs (cumulative %.1f pct)", i,
+        (unsigned long long)hist[i], 100.0 * acc / (double)pairs);
+    }
+    return 0;
+  }
+  if (mode == "pfilt") {
+    u32 n = 0; readIdx(path.c_str(), n);
+    // dominate: A better than B iff A.k <= B.k and A.t1 >= B.t1 and A.t2 <= B.t2
+    auto better = [](const Ent& A, const Ent& B) {
+      return A.k <= B.k && A.t1 >= B.t1 && A.t2 <= B.t2;
+    };
+    u64 before = 0, after = 0, pairs = 0, maxf = 0;
+    std::vector<u64> hist(64, 0);
+    for (u32 v = 0; v < n; v++) {
+      for (int w = 0; w < 2; w++) {
+        std::vector<Ent>& L = w ? Lout[v] : Lin[v];
+        before += L.size();
+        std::sort(L.begin(), L.end(), [](const Ent& a, const Ent& b) {
+          if (a.w != b.w) return a.w < b.w;
+          if (a.k != b.k) return a.k < b.k;
+          if (a.t1 != b.t1) return a.t1 > b.t1;
+          return a.t2 < b.t2;
+        });
+        std::vector<Ent> out;
+        size_t i = 0;
+        while (i < L.size()) {
+          size_t j = i;
+          while (j < L.size() && L[j].w == L[i].w) j++;
+          std::vector<Ent> keep;
+          for (size_t a = i; a < j; a++) {
+            bool dom = false;
+            for (size_t b = i; b < j && !dom; b++)
+              if (a != b && better(L[b], L[a]) && (L[b].k < L[a].k || L[b].t1 > L[a].t1 || L[b].t2 < L[a].t2))
+                dom = true;
+            if (!dom) keep.push_back(L[a]);
+          }
+          pairs++;
+          if (keep.size() > maxf) maxf = keep.size();
+          if (keep.size() < 64) hist[keep.size()]++;
+          for (Ent& e : keep) out.push_back(e);
+          i = j;
+        }
+        L = out;
+        after += L.size();
+      }
+    }
+    P("[pfilt] before=%llu after=%llu pairs=%llu max-frontier=%llu",
+      (unsigned long long)before, (unsigned long long)after,
+      (unsigned long long)pairs, (unsigned long long)maxf);
+    u64 acc = 0;
+    for (u32 i = 1; i < 64; i++) if (hist[i]) {
+      acc += hist[i];
+      P("  frontier=%u : %llu pairs (cum %.1f pct)", i, (unsigned long long)hist[i],
+        100.0 * acc / (double)pairs);
+    }
+    if (argc > 3) writeIdx(n, argv[3]);
+    return 0;
+  }
+  P("usage: paper convert|build|idump|analyze|pfilt|iquery|online <file> [args]");
   return 1;
 }
