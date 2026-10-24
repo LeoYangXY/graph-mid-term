@@ -121,15 +121,25 @@ means "the GPU is 2.5x slower than something that throws away 60% of the answers
 not "the GPU is slow". The fair comparison is against the *faithful* baseline,
 which is the only complete one:
 
-| dataset | GPU PP=12, 94% recall | CPU faithful, 100% recall | speedup |
-|---|---|---|---|
-| linux-kernel | 47.76 s | >2 h 20 min (still running) | **>176x** |
-| wikiquote_pl | 0.99 s | 1.16 s | 0.85x |
+| dataset | GPU PP=6, 89.5% | GPU PP=12, 94.0% | CPU faithful, 100% | speedup PP=6 | PP=12 |
+|---|---|---|---|---|---|
+| linux-kernel | **19.33 s** | **47.76 s** | **49,981.5 s (13.9 h)** | **2586x** | **1046x** |
+| wikiquote_pl | 0.49 s | 0.99 s | 1.16 s | 2.4x | 1.17x |
+
+The faithful run was verified complete: ' + BT + 'cmp' + BT + ' reports both=1211,
+index-only=0, online-only=0, i.e. it answers exactly what exact BFS answers.
+So on linux-kernel the GPU builds a 94%-complete index in 47.76 s versus 13.9 h
+for a 100%-complete one, and both are sound.
+
+Caveat: 13.9 h for 205,611 transformed edges is far worse than the paper Table 7
+(BR: 546,939 edges in 21 min), so our faithful reproduction is considerably
+slower than theirs. Against their implementation the speedup would be smaller
+than 1046x, but the direction and the order of magnitude hold.
 
 So the real picture is:
 
-- **on graphs big enough to fill the machine the GPU wins big** (epinions 32x vs
-  the merged baseline; linux-kernel >176x vs the faithful one)
+- **on graphs big enough to fill the machine the GPU wins big** (epinions 32.3x vs
+  the merged baseline; linux-kernel 1046x at PP=12 vs the faithful one)
 - **on tiny graphs the GPU genuinely loses** (wikiquote_pl 4,154 edges: 0.99 s vs
   1.16 s). Dense batching of M x S work cannot pay off when M is that small. The
   crossover point has not been located yet.
