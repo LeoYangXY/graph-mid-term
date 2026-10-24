@@ -115,14 +115,26 @@ contiguous (the earlier `[(v*B+q)*PP + p]` layout was not coalesced).
 | **epinions** | **6** | **233.2 s** | **32.3x** | 2.28B | 1042 / 1109 | **94.0%** | **0** |
 | **epinions** | **12** | **617.3 s** | **12.2x** | 3.45B | 1063 / 1109 | **95.9%** | **0** |
 
-Two things to read off this table:
+**Warning: the "vs serial CPU" column above is NOT apples-to-apples.** It compares
+against the *merged* CPU baseline, which only reaches ~39% recall. A 0.40x there
+means "the GPU is 2.5x slower than something that throws away 60% of the answers",
+not "the GPU is slow". The fair comparison is against the *faithful* baseline,
+which is the only complete one:
 
-1. **Every configuration is sound**: false positives = 0, verified query by query
-   against exact BFS. The misses are pure false negatives.
-2. **On the two small graphs the GPU is not faster than the merged CPU baseline**
-   - because that baseline throws away 60% of the answers. On epinions, where the
-   baseline takes 2 h 5 min, the GPU is **32x faster while being more complete**
-   (94% recall vs 39%).
+| dataset | GPU PP=12, 94% recall | CPU faithful, 100% recall | speedup |
+|---|---|---|---|
+| linux-kernel | 47.76 s | >2 h 20 min (still running) | **>176x** |
+| wikiquote_pl | 0.99 s | 1.16 s | 0.85x |
+
+So the real picture is:
+
+- **on graphs big enough to fill the machine the GPU wins big** (epinions 32x vs
+  the merged baseline; linux-kernel >176x vs the faithful one)
+- **on tiny graphs the GPU genuinely loses** (wikiquote_pl 4,154 edges: 0.99 s vs
+  1.16 s). Dense batching of M x S work cannot pay off when M is that small. The
+  crossover point has not been located yet.
+- **every configuration is sound**: false positives = 0, verified query by query
+  against exact BFS. All misses are pure false negatives.
 
 "missed" is counted per query against exact BFS (`paper cmp`): a pure false
 negative, never a false positive.
