@@ -218,6 +218,37 @@ static void runBFS(const CSR& c, u32 u, int dir,
   }
 }
 
+static int gFaithful = 0;
+
+template <class Cmp>
+static void runBFS1(const CSR& c, u32 u, u32 seedEdge, int dir,
+                    std::vector<std::vector<Ent>>& tmp,
+                    std::vector<u32>& tlist, u32 stampVal) {
+  std::priority_queue<St, std::vector<St>, Cmp> pq;
+  u32 y0 = c.dst[seedEdge];
+  if (ord[y0] > ord[u]) {
+    stamp[seedEdge] = stampVal;
+    pq.push(St{y0, c.ta[seedEdge], c.tb[seedEdge], 1});
+  }
+  while (!pq.empty()) {
+    St s = pq.top(); pq.pop();
+    u32 v = s.v;
+    if (tmp[v].empty()) tlist.push_back(v);
+    tryAdd(tmp[v], u, s.ts, s.te, s.k);
+    for (u32 p = c.off[v]; p < c.off[v + 1]; p++) {
+      if (stamp[p] == stampVal) continue;
+      u32 y = c.dst[p];
+      if (ord[y] <= ord[u]) continue;
+      u32 t1 = c.ta[p], t2 = c.tb[p];
+      if (dir > 0) {
+        if (t1 >= s.te) { stamp[p] = stampVal; pq.push(St{y, s.ts, t2, s.k + 1}); }
+      } else {
+        if (t2 <= s.ts) { stamp[p] = stampVal; pq.push(St{y, t1, s.te, s.k + 1}); }
+      }
+    }
+  }
+}
+
 static void indexBuildPlus(const CSR& c, u32 n) {
   Lin.assign(n, std::vector<Ent>());
   Lout.assign(n, std::vector<Ent>());
@@ -235,12 +266,21 @@ static void indexBuildPlus(const CSR& c, u32 n) {
   for (u32 r = 0; r < n; r++) {
     u32 u = vs[r];
     u32 sv = u + 1;
+    if (gFaithful) {
+      u32 svc = 1000000u + r;
+      for (u32 p = c.off[u]; p < c.off[u + 1]; p++) runBFS1<CmpF>(c, u, p, 1, tmpIn, tlist, svc++);
+      for (u32 v : tlist) { for (Ent& e : tmpIn[v]) Lin[v].push_back(e); tmpIn[v].clear(); }
+      tlist.clear();
+      for (u32 p = c.off[u]; p < c.off[u + 1]; p++) runBFS1<CmpB>(c, u, p, -1, tmpOut, tlist, svc++);
+      for (u32 v : tlist) { for (Ent& e : tmpOut[v]) Lout[v].push_back(e); tmpOut[v].clear(); }
+    } else {
     tlist.clear();
     runBFS<CmpF>(c, u, 1, tmpIn, tlist, sv);
     for (u32 v : tlist) { for (Ent& e : tmpIn[v]) Lin[v].push_back(e); tmpIn[v].clear(); }
     tlist.clear();
     runBFS<CmpB>(c, u, -1, tmpOut, tlist, sv);
     for (u32 v : tlist) { for (Ent& e : tmpOut[v]) Lout[v].push_back(e); tmpOut[v].clear(); }
+    }
     if ((r & 8191) == 0) P("  built %u / %u  (%.1f pct)", r, n, 100.0 * r / n);
   }
 }
@@ -261,6 +301,31 @@ static TG loadTG(const std::string& p) {
   fread(t.a.data(), 4, mm, f); fread(t.b.data(), 4, mm, f);
   fread(t.ta.data(), 4, mm, f); fread(t.tb.data(), 4, mm, f);
   fclose(f); return t;
+}
+
+static void writeIdx(u32 n, const char* p) {
+  FILE* f = fopen(p, "wb");
+  fwrite(&n, 4, 1, f);
+  for (u32 v = 0; v < n; v++) {
+    u32 c = (u32)Lin[v].size(); fwrite(&c, 4, 1, f);
+    fwrite(Lin[v].data(), sizeof(Ent), c, f);
+    c = (u32)Lout[v].size(); fwrite(&c, 4, 1, f);
+    fwrite(Lout[v].data(), sizeof(Ent), c, f);
+  }
+  fclose(f);
+}
+static void readIdx(const char* p, u32& n) {
+  FILE* f = fopen(p, "rb");
+  if (!f) { P("cannot open index"); exit(1); }
+  fread(&n, 4, 1, f);
+  Lin.assign(n, std::vector<Ent>()); Lout.assign(n, std::vector<Ent>());
+  for (u32 v = 0; v < n; v++) {
+    u32 c = 0; fread(&c, 4, 1, f); Lin[v].resize(c);
+    fread(Lin[v].data(), sizeof(Ent), c, f);
+    fread(&c, 4, 1, f); Lout[v].resize(c);
+    fread(Lout[v].data(), sizeof(Ent), c, f);
+  }
+  fclose(f);
 }
 
 int main(int argc, char** argv) {
@@ -319,6 +384,40 @@ int main(int argc, char** argv) {
       t.n, (unsigned long long)t.m(), k, qs.size(), el, el * 1e6 / qs.size(), pos);
     return 0;
   }
-  P("usage: paper convert|build|online <file> [args]");
+  if (mode == "idump" || mode == "idump2") {
+    gFaithful = (mode == "idump2") ? 1 : 0;
+    TB g = load(path);
+    TG t = graphConvert(g);
+    CSR c = build_csr(t);
+    double t0 = now_s(); indexBuildPlus(c, t.n); double tb = now_s() - t0;
+    u64 tot = 0;
+    for (u32 i = 0; i < t.n; i++) tot += Lin[i].size() + Lout[i].size();
+    P("[indexBuild+] time=%.4f s entries=%llu", tb, (unsigned long long)tot);
+    writeIdx(t.n, argv[3]);
+    return 0;
+  }
+  if (mode == "iquery") {
+    u32 n = 0; readIdx(path.c_str(), n);
+    std::vector<u32> qs, qt, qa, qb;
+    FILE* f = fopen(argv[3], "rb");
+    u32 a, b, s2, e2;
+    while (fscanf(f, "%u %u %u %u", &a, &b, &s2, &e2) == 4) {
+      qs.push_back(a); qt.push_back(b);
+      if (s2 <= e2) { qa.push_back(s2); qb.push_back(e2); } else { qa.push_back(e2); qb.push_back(s2); }
+    }
+    fclose(f);
+    u32 k = argc > 4 ? atoi(argv[4]) : 3;
+    int nq = argc > 5 ? atoi(argv[5]) : 0;
+    if (nq > 0 && nq < (int)qs.size()) { qs.resize(nq); qt.resize(nq); qa.resize(nq); qb.resize(nq); }
+    double t0 = now_s();
+    size_t pos = 0;
+    for (size_t i = 0; i < qs.size(); i++)
+      if (indexQuery(qs[i], qt[i], qa[i], qb[i], k)) pos++;
+    double el = now_s() - t0;
+    P("[indexQuery] N=%u q=%zu k=%u total=%.4f s per-query=%.2f us positive=%zu",
+      n, qs.size(), k, el, el * 1e6 / qs.size(), pos);
+    return 0;
+  }
+  P("usage: paper convert|build|idump|iquery|online <file> [args]");
   return 1;
 }

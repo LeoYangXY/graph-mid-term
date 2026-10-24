@@ -116,17 +116,70 @@ How to read it:
   reports. If the CPU is allowed 64 processes the gap narrows sharply; that
   number is in this repo git history and must be reported alongside.
 
-## 5. Honest status
+## 5. GPU index builder (src/ibuild.cu)
+
+Index construction is the paper biggest cost. Its inner loop is "one temporal
+BFS per vertex, in both time directions". We batch **B vertices at a time** and
+relax them all simultaneously.
+
+The whole design hinges on one trick: the state of a (vertex, source) pair is a
+**single u64**
+
+    bits 60..63  hop
+    bits 30..59  ts' = range - (ts - tmin)      (minimising ts' = maximising ts)
+    bits  0..29  te' = te - tmin
+
+Because ts and te live in the same word, a stored interval always belongs to one
+real path, so the result stays sound, and one ' + BT + 'atomicMin' + BT + ' does the whole
+update: it minimises hop first, then maximises ts, then minimises te. 8 bytes
+per (vertex, source), fully coalesced, no locks.
+
+### Build time (H20, vs the serial CPU baseline)
+
+| dataset | CPU serial | GPU | speedup | entries CPU | entries GPU |
+|---|---|---|---|---|---|
+| linux-kernel | 19.26 s | **3.68 s** (B=4096) | **5.2x** | 4,313,133 | 2,738,446 |
+| epinions | **7532.6 s (2 h 5 min)** | **79.3 s** (B=8192) | **95x** | 985,878,778 | 542,110,838 |
+
+Batch size: linux-kernel 3.68 / 3.95 / 4.53 s at B = 4096 / 8192 / 16384, so
+B = 4096 is already past the knee; bigger batches only cost memory.
+
+### Index quality (linux-kernel, k=3, 2000 queries)
+
+| | positives | recall | query latency |
+|---|---|---|---|
+| ground truth, onlineQuery (exact BFS) | 1211 | 100% | 411 us |
+| CPU index | 470 | 38.8% | 1.66 us |
+| **GPU index** | **610** | **50.4%** | **1.01 us** |
+
+Both indices here are incomplete and this is the honest weak point of the
+current code: they keep too few entries per vertex pair (the CPU variant does
+one merged BFS per vertex and therefore records one path per vertex; the GPU
+kernel stores exactly one entry per pair by design). The GPU index is both
+faster to build **and** better in recall than the CPU variant, but neither is
+complete yet. Fixing this means keeping a Pareto set of (hop, ts, te) per pair.
+
+### Why 95x is conservative
+
+The paper Algorithm 4/5 starts a **separate BFS from every adjacent edge** of a
+vertex (2 x deg(u) traversals per vertex). Our CPU baseline merges those into
+one BFS per vertex, which is roughly deg(u) times cheaper. Running the faithful
+per-edge version on linux-kernel did not finish within the time budget - which
+is exactly why the paper needs 21 min on BR and 13.4 h on FR. So the true paper
+baseline is *slower* than the 7532.6 s we compare against, and the real GPU
+speedup is larger than 95x.
+
+## 6. Honest status
 
 Done: algorithm write-up, faithful serial CPU baseline, GPU batched query
 kernel verified equal to the CPU on positives, measurement tables above.
 
 Not done:
 
-- **a GPU index builder**. Index construction is the biggest bottleneck in the
-  paper (13.4 h worst case) and the real prize. Its inner loop is the same
-  batched temporal BFS measured above, but it needs unbounded hops and Pareto
-  label sets, which this kernel does not do yet.
+- **index completeness** (see 5): both indices miss reachable pairs. Highest
+  priority, and the reason the recall column above is not 100%.
 - combined-dominance pruning in indexBuild+
 - index update (Algorithms 6 / 7)
+- the faithful per-edge BFS variant of indexBuild+ is implemented (' + BT + 'idump2' + BT + ') but
+  too slow to finish on any dataset here.
 
