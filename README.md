@@ -106,13 +106,23 @@ contiguous (the earlier `[(v*B+q)*PP + p]` layout was not coalesced).
 
 ### Results (verified sound: index-only = 0, i.e. no false positives)
 
-| dataset | PP | GPU build | entries | correct | missed | recall |
-|---|---|---|---|---|---|---|
-| wikiquote_pl | 6 | 0.49 s | 15,952 | 936 | 148 | 86.3% |
-| wikiquote_pl | 12 | 0.99 s | 18,594 | 998 | 86 | 92.1% |
-| linux-kernel | 6 | 19.33 s | 9.54M | 1084 | 127 | 89.5% |
-| linux-kernel | 12 | 47.76 s | 13.28M | 1138 | 73 | 94.0% |
-| epinions | 6 | see below | - | - | - | - |
+| dataset | PP | GPU build | vs serial CPU | entries | correct / truth | recall | false pos |
+|---|---|---|---|---|---|---|---|
+| wikiquote_pl | 6 | 0.49 s | 0.008x | 15,952 | 936 / 1084 | 86.3% | 0 |
+| wikiquote_pl | 12 | 0.99 s | 0.004x | 18,594 | 998 / 1084 | 92.1% | 0 |
+| linux-kernel | 6 | 19.33 s | 1.0x | 9.54M | 1084 / 1211 | 89.5% | 0 |
+| linux-kernel | 12 | 47.76 s | 0.40x | 13.28M | 1138 / 1211 | 94.0% | 0 |
+| **epinions** | **6** | **233.2 s** | **32.3x** | 2.28B | 1042 / 1109 | **94.0%** | **0** |
+| **epinions** | **12** | **617.3 s** | **12.2x** | 3.45B | 1063 / 1109 | **95.9%** | **0** |
+
+Two things to read off this table:
+
+1. **Every configuration is sound**: false positives = 0, verified query by query
+   against exact BFS. The misses are pure false negatives.
+2. **On the two small graphs the GPU is not faster than the merged CPU baseline**
+   - because that baseline throws away 60% of the answers. On epinions, where the
+   baseline takes 2 h 5 min, the GPU is **32x faster while being more complete**
+   (94% recall vs 39%).
 
 "missed" is counted per query against exact BFS (`paper cmp`): a pure false
 negative, never a false positive.
