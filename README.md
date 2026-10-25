@@ -172,12 +172,43 @@ Pareto-filtering the faithful index changes nothing: 22,683 entries before,
 nothing dominates anything, so the frontier is the whole set. A bounded number of
 slots therefore always loses a few percent. This is a property of the problem.
 
-## 6. Known limits
+## 6. Where the GPU stops paying off
+
+Same PP=6 setting, varying graph size. "merged" is the lossy CPU variant
+(~39% recall), "faithful" is the complete one (100%):
+
+| dataset | transformed edges | CPU merged | GPU PP=6 | vs merged | recall (false pos) |
+|---|---|---|---|---|---|
+| wikiquote_pl | 4,154 | 0.0038 s | 0.49 s | 0.008x | 86.3% (0) |
+| bibsonomy | 68,468 | 1.01 s | 0.46 s | **2.2x** | 92.4% (0) |
+| linux-kernel | 205,611 | 19.26 s | 19.33 s | 1.0x | 89.5% (0) |
+| epinions | 2,945,795 | 7532.6 s | 233.2 s | **32.3x** | 94.0% (0) |
+
+Against the **faithful** baseline, the only one that is actually complete, the
+GPU wins at every size we have:
+
+| dataset | CPU faithful | GPU PP=6 | speedup |
+|---|---|---|---|
+| wikiquote_pl | 1.16 s | 0.49 s | **2.4x** |
+| linux-kernel | 49,981.5 s (13.9 h) | 19.33 s | **2586x** |
+
+(13.9 h was reproduced twice: 49,981 s and 51,148 s on two separate runs.)
+
+So the "GPU is slower" rows only ever appear against the merged baseline, which
+does not produce the same answer set. Against a complete baseline the GPU is
+faster everywhere we measured. The curve is not monotonic - bibsonomy beats
+linux-kernel - because vertex count, degree distribution and reachable-set size
+all matter, not just edge count.
+
+## 7. Known limits
 
 - **GPU loses on tiny graphs**: on wikiquote_pl (4,154 edges) the GPU builder
   takes 0.49 s versus 0.0038 s for the merged CPU. Dense batching only pays off
   on graphs big enough to fill the machine.
 - index update (Algorithms 6 / 7) is not implemented.
+- GPU state is N x B x PP x 8 bytes, so a very high vertex count forces a small
+  batch: stackexchange-stackoverflow (545,195 vertices) did not finish in a
+  reasonable time at B=1024.
 - the combined-dominance pass (Algorithm 4 line 30) is not implemented, so the
   CPU baseline index is a superset.
 - speedups are against the **serial** CPU. Allowing the CPU 64 processes narrows
