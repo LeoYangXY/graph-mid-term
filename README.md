@@ -183,7 +183,7 @@ Same PP=6 setting, varying graph size. "merged" is the lossy CPU variant
 | bibsonomy | 68,468 | 1.01 s | 0.46 s | **2.2x** | 92.4% (0) |
 | linux-kernel | 205,611 | 19.26 s | 19.33 s | 1.0x | 89.5% (0) |
 | epinions | 2,945,795 | 7532.6 s | 233.2 s | **32.3x** | 94.0% (0) |
-| stackexchange | 1,185,347 | 215.0 s | **3763.5 s** | **0.057x** | 100% (0) |
+| stackexchange | 1,185,347 | 215.0 s | **3763.5 s** | **0.057x** | 100% (0) |  (3567 s on a repeat run)
 
 Against the **faithful** baseline, the only one that is actually complete, the
 GPU wins at every size we have:
