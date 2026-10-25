@@ -183,6 +183,7 @@ Same PP=6 setting, varying graph size. "merged" is the lossy CPU variant
 | bibsonomy | 68,468 | 1.01 s | 0.46 s | **2.2x** | 92.4% (0) |
 | linux-kernel | 205,611 | 19.26 s | 19.33 s | 1.0x | 89.5% (0) |
 | epinions | 2,945,795 | 7532.6 s | 233.2 s | **32.3x** | 94.0% (0) |
+| stackexchange | 1,185,347 | 215.0 s | **3763.5 s** | **0.057x** | 100% (0) |
 
 Against the **faithful** baseline, the only one that is actually complete, the
 GPU wins at every size we have:
@@ -194,9 +195,23 @@ GPU wins at every size we have:
 
 (13.9 h was reproduced twice: 49,981 s and 51,148 s on two separate runs.)
 
-So the "GPU is slower" rows only ever appear against the merged baseline, which
-does not produce the same answer set. Against a complete baseline the GPU is
-faster everywhere we measured. The curve is not monotonic - bibsonomy beats
+So the "GPU is slower" rows against the merged baseline are mostly explained by
+that baseline not producing the same answer set -- but **stackexchange is a real
+loss and should not be explained away**. It is 17x slower on the GPU for two
+concrete reasons:
+
+1. N = 545,195 vertices forces B = 1024 (GPU state is N x B x PP x 8 bytes),
+   which starves the batch dimension and makes every round inefficient.
+2. Only 46 of 2000 queries are reachable at k = 3, i.e. reachable sets are tiny.
+   The dense kernel pays N x M x rounds x PP work no matter how small the answer
+   is, while the CPU pruned BFS only pays for what it actually visits.
+
+Rule of thumb that falls out of these five datasets: the dense batched kernel
+wins when reachable sets are large relative to the graph (epinions, linux-kernel)
+and loses when they are small (stackexchange) or when the vertex count is so
+high that B has to shrink. Against a **complete** baseline the GPU still wins
+everywhere we could measure (wikiquote 2.4x, linux-kernel 2586x); we do not have
+a faithful run for stackexchange or epinions. The curve is not monotonic - bibsonomy beats
 linux-kernel - because vertex count, degree distribution and reachable-set size
 all matter, not just edge count.
 
