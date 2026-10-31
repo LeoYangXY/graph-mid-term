@@ -288,6 +288,69 @@ static void indexBuildPlus(const CSR& c, u32 n) {
   }
 }
 
+
+// Algorithm 5 (indexBuild+), faithful reading.
+// Short-interval-first: seeds in descending start time, queue by (k asc, te asc).
+// Line 12 replaces the temp label set: an entry already derivable from the index
+// under construction is dropped AND not expanded (Continue).
+// Two places where the pseudocode is ambiguous and we pick the reading that keeps
+// the index complete:
+//   * visited is per (hub, seed, direction), not per hub. Sharing it across the
+//     deg(u) seeds starves every seed after the first, which loses answers.
+//   * an edge is marked only when the state is actually enqueued, so a state that
+//     fails the time test cannot block a later valid one.
+static std::vector<u32> tokArr;
+static u32 gTok = 0;
+
+template <bool FWD>
+static void alg5Pass(const CSR& c, u32 u, u32 seed, u32 tok) {
+  std::priority_queue<St, std::vector<St>, CmpF> pq;
+  tokArr[seed] = tok;
+  pq.push(St{c.dst[seed], c.ta[seed], c.tb[seed], 1});
+  while (!pq.empty()) {
+    St s = pq.top(); pq.pop();
+    bool covered = FWD ? indexQuery(u, s.v, s.ts, s.te, s.k)
+                       : indexQuery(s.v, u, s.ts, s.te, s.k);
+    if (covered) continue;
+    if (FWD) Lin[s.v].push_back(Ent{u, s.ts, s.te, s.k});
+    else     Lout[s.v].push_back(Ent{u, s.ts, s.te, s.k});
+    for (u32 e = c.off[s.v]; e < c.off[s.v + 1]; e++) {
+      if (tokArr[e] == tok) continue;
+      u32 y = c.dst[e];
+      if (ord[y] <= ord[u]) continue;
+      u32 t1 = c.ta[e], t2 = c.tb[e];
+      if (FWD) { if (t1 >= s.te) { tokArr[e] = tok; pq.push(St{y, s.ts, t2, s.k + 1}); } }
+      else     { if (t2 <= s.ts) { tokArr[e] = tok; pq.push(St{y, t1, s.te, s.k + 1}); } }
+    }
+  }
+}
+
+static void indexBuildPlus5(const CSR& c, u32 n) {
+  Lin.assign(n, std::vector<Ent>());
+  Lout.assign(n, std::vector<Ent>());
+  ord.assign(n, 0);
+  std::vector<u32> vs(n), deg(n);
+  for (u32 i = 0; i < n; i++) { vs[i] = i; deg[i] = c.off[i + 1] - c.off[i]; }
+  std::sort(vs.begin(), vs.end(), [&](u32 a, u32 b) {
+    if (deg[a] != deg[b]) return deg[a] > deg[b];
+    return a < b;
+  });
+  for (u32 r = 0; r < n; r++) ord[vs[r]] = r;
+  tokArr.assign(c.off[n], 0);
+  std::vector<u32> seeds;
+  for (u32 r = 0; r < n; r++) {
+    u32 u = vs[r];
+    seeds.clear();
+    for (u32 p = c.off[u]; p < c.off[u + 1]; p++) seeds.push_back(p);
+    std::sort(seeds.begin(), seeds.end(), [&](u32 a, u32 b) {
+      if (c.ta[a] != c.ta[b]) return c.ta[a] > c.ta[b];   // short-interval-first
+      return a < b;
+    });
+    for (u32 p : seeds) { alg5Pass<true>(c, u, p, ++gTok); alg5Pass<false>(c, u, p, ++gTok); }
+    if ((r & 255) == 0) P("  alg5 %u / %u (%.1f pct)", r, n, 100.0 * r / n);
+  }
+}
+
 static void saveTG(const TG& t, const std::string& p) {
   FILE* f = fopen(p.c_str(), "wb");
   u64 mm = t.m();
@@ -406,12 +469,16 @@ int main(int argc, char** argv) {
       t.n, (unsigned long long)t.m(), k, qs.size(), el, el * 1e6 / qs.size(), pos);
     return 0;
   }
-  if (mode == "idump" || mode == "idump2") {
+  if (mode == "idump" || mode == "idump2" || mode == "idump3") {
     gFaithful = (mode == "idump2") ? 1 : 0;
+    if (mode == "idump3") mode = "idump";
     TB g = load(path);
     TG t = graphConvert(g);
     CSR c = build_csr(t);
-    double t0 = now_s(); indexBuildPlus(c, t.n); double tb = now_s() - t0;
+    double t0 = now_s();
+    if (argc > 4 && std::string(argv[4]) == "alg5") indexBuildPlus5(c, t.n);
+    else indexBuildPlus(c, t.n);
+    double tb = now_s() - t0;
     u64 tot = 0;
     for (u32 i = 0; i < t.n; i++) tot += Lin[i].size() + Lout[i].size();
     P("[indexBuild+] time=%.4f s entries=%llu", tb, (unsigned long long)tot);

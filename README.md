@@ -77,6 +77,38 @@ and linux-kernel (K=3,5, 100k queries).
 Limitation of this evidence: it is verification on these graphs and these queries,
 not a proof for arbitrary inputs.
 
+## Sparse-frontier builder: measured speedup
+
+The dense builder cleared and scanned N x K x P x B cells per batch and
+direction. The current one keeps two hop buffers plus a frontier list of the
+(vertex, source) pairs that actually hold data, so clearing, emitting and
+expanding cost O(frontier). Same batch, same answers:
+
+| dataset | K | dense | sparse | speedup |
+|---|---|---|---|---|
+| linux-kernel | 5 | 26.15 s | **4.83 s** | 5.4x |
+| FR | 3 | 119.7 s | **17.5 s** | 6.8x |
+| FR | 5 | 250.9 s | **42.1 s** | 6.0x |
+
+All configurations still compare equal to exact BFS (0 false positives, 0 false
+negatives). The remaining time is the frontier expansion itself, i.e. real work.
+
+## GPU index construction on every paper dataset
+
+B=16, single H20, 5000-query verification against exact BFS per row.
+
+| dataset | N | M (transformed) | K=3 | K=5 | entries K=5 | index K=5 |
+|---|---|---|---|---|---|---|
+| zhwiki | 50,144 | 2,164,194 | 28.8 s | 61.6 s | 43.1 M | 659 MB |
+| elwiki | 11,906 | 765,013 | 6.1 s | 11.0 s | 3.4 M | 52 MB |
+| dawiki | 19,373 | 464,830 | 5.8 s | 9.4 s | 6.6 M | 102 MB |
+| trwiki | 40,965 | 998,272 | 9.3 s | 16.6 s | 16.7 M | 255 MB |
+| arwiki | 36,493 | 1,383,543 | 13.5 s | 29.4 s | 12.0 M | 184 MB |
+| gowalla | 58,632 | 1,406,933 | 12.3 s | 44.3 s | 720 M | 11 GB |
+| FR | 72,517 | 3,381,679 | 18.5 s | 45.5 s | 173 M | 2.6 GB |
+
+Every row: index-only = 0, online-only = 0.
+
 ## What hop length is actually guaranteed? (measured)
 
 A TB2Hop index built with hop bound K answers a query of length L correctly iff some
