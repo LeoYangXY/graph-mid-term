@@ -77,6 +77,63 @@ and linux-kernel (K=3,5, 100k queries).
 Limitation of this evidence: it is verification on these graphs and these queries,
 not a proof for arbitrary inputs.
 
+## What hop length is actually guaranteed? (measured)
+
+A TB2Hop index built with hop bound K answers a query of length L correctly iff some
+hub x on the path satisfies dist(s,x) <= K and dist(x,t) <= K. Every path has a hub
+with minimum rank, and both halves stay in the rank-restricted subgraph, so
+
+> **L <= K is always covered. L up to 2K is covered only when the minimum-rank
+> vertex happens to sit near the middle of the path. That is luck, not a guarantee.**
+
+Measured on elwiki (20k queries, guard disabled to expose the cliff):
+
+| index KHOP | k=1 | k=2 | k=3 | k=4 | k=5 | k=6 |
+|---|---|---|---|---|---|---|
+| 2 | 0 | 0 | 1 | 11 | 16 | 17 |
+| 3 | 0 | 0 | 0 | 0 | 0 | 1 |
+| 4 | 0 | 0 | 0 | 0 | 0 | 1 |
+
+(numbers are false negatives; false positives stay 0 everywhere)
+
+Two things follow. First, k <= KHOP is exact by construction, which is why the
+reader refuses k > KHOP instead of answering. Second, practical coverage can reach
+beyond KHOP on a friendly graph (KHOP=3 covered k=5 here), but that depends on the
+data and must not be sold as a guarantee.
+
+The paper never faces this: its build has no hop bound at all, so it covers every
+path length and never truncates.
+
+## Cost model: where the time actually goes
+
+State is one array of N x K x P x B u64, cleared and compacted once per batch and
+direction. Total traffic is therefore
+
+    memset + scan  ~  2 x (N/B) x N*K*P*B*8 bytes  =  16 * N^2 * K * P  bytes
+
+Independent of B, quadratic in the vertex count. Predicted vs measured:
+
+| dataset | N | K | P | predicted traffic | time | implied bandwidth |
+|---|---|---|---|---|---|---|
+| elwiki | 11,906 | 5 | 1024 | 11.6 TB | 8.2 s | 1.4 TB/s |
+| FR | 72,517 | 3 | 1024 | 258 TB | 119.7 s | 2.2 TB/s |
+
+So the builder is not compute bound: on FR at B=16 the GPU was busy in only 12% of
+samples (95% when busy), peak DRAM 82%. It is bound by touching an array that is
+almost entirely empty.
+
+Larger batches do **not** help - they make it worse, because the per-batch array
+grows with B while the number of batches shrinks in step, so the traffic is fixed
+while frontier pressure rises:
+
+| FR | B=16 | B=128 |
+|---|---|---|
+| K=3 | 119.7 s | 246.8 s |
+| K=5 | 250.9 s | 513.1 s |
+
+The fix is to stop clearing and scanning the whole N x K x P x B array and instead
+only touch the (vertex, hop, source) cells that a batch actually wrote.
+
 ## Results: elwiki (N=11906, M=765013, B=8)
 
 | KHOP | build | index size | entries | query (100k) | cmp |

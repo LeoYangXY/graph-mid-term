@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
         if (size > stateCapacity) {
           if (state) CK(cudaFree(state));
           state = nullptr;
+          stateCapacity = 0;  // must forget the old capacity: the shrink path continues
           size_t available, deviceTotal; CK(cudaMemGetInfo(&available, &deviceTotal));
           // Shrink the batch before giving up: batches are independent, so a
           // smaller nb is still exact, just less parallel.
