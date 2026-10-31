@@ -134,6 +134,18 @@ while frontier pressure rises:
 The fix is to stop clearing and scanning the whole N x K x P x B array and instead
 only touch the (vertex, hop, source) cells that a batch actually wrote.
 
+B=32 is slower than B=8 on elwiki too (21.9 s vs 8.2 s), and B=128 is slower
+than B=16 on FR. So the guidance is: small batches, and the real win is sparsity.
+
+Same runs, verified against exact BFS (batch size does not change the result):
+
+| run | build | entries | cmp |
+|---|---|---|---|
+| lk K=5, B=128 (auto 16) | 35.9 s | 28,545,476 | 0 / 0 |
+| elwiki K=5, B=32 | 21.9 s | 3,293,402 | 0 / 0 |
+
+
+
 ## Results: elwiki (N=11906, M=765013, B=8)
 
 | KHOP | build | index size | entries | query (100k) | cmp |
