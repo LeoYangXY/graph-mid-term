@@ -103,6 +103,43 @@ scans `L_out(s) x L_in(t)` as a nested loop instead of grouping entries by share
 vertex as Algorithm 3 does. At K=5 the index is 3x larger and the naive scan costs
 9x more, which is exactly the quadratic term. Optimising it is the obvious next step.
 
+## How large does KHOP need to be? (measured)
+
+The paper has no hop bound, so a natural question is what the bound would be.
+
+- Upper bound: a shortest wedge path never repeats a vertex, so k <= |V| - 1.
+- Actual: it is set by the temporal structure (how long a chain of time-ordered,
+  non-overlapping intervals exists), not by the vertex count alone.
+
+Measured on K=12 builds, entries added per hop:
+
+| k | elwiki added | linux-kernel added |
+|---|---|---|
+| 5 | 1,019,523 | 10,745,085 |
+| 8 | 1,016,544 | 11,971,996 |
+| 12 | 1,022,193 | 12,126,328 |
+
+There is **no saturation through k=12** - every extra hop adds about as many entries
+as the previous one. So the index grows roughly linearly in K, and so does build
+cost:
+
+| dataset | K=5 | K=12 |
+|---|---|---|
+| elwiki | 8.18 s / 52 MB | 24.01 s / 168 MB |
+| linux-kernel | 26.15 s / 440 MB | 50.80 s / 1.8 GB |
+
+An unbounded build therefore has no natural small K; it runs until the temporal
+structure can no longer extend a path. That is the mechanism behind the paper's
+Table 7 (BR 21 min, FR 13.4 h). Capping K at 5 is a deliberate trade: it covers the
+paper's query range k in [1,5] while keeping the index and the build bounded.
+
+## Results: FR (N=72517, M=3381679, B=16, 20k queries)
+
+| KHOP | build | index size | entries | indexQuery | onlineQuery | cmp |
+|---|---|---|---|---|---|---|
+| 3 | 117.5 s | 681 MB | 44,565,794 | 2.60 us/q | 179.6 us/q | 0/0 |
+| 5 | 250.9 s | 2.5 GB | 167,697,429 | 34.46 us/q | 1108.2 us/q | 0/0 |
+
 ## Results: GPU online query (`src/q.cu`)
 
 This is a batched re-implementation of Algorithm 2, not an index query. Earlier
