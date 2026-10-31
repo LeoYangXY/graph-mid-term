@@ -1,25 +1,30 @@
-# GPU arch:  H20 / A100 / H100 -> sm_90     RTX 5050 laptop -> sm_120
+# H20/H100: sm_90; A100: sm_80; RTX 5050 Laptop: sm_120
 ARCH ?= sm_90
-PP   ?= 12
-CXX  ?= g++
+KHOP ?= 5
+SPH ?= 128
+CXX ?= g++
 NVCC ?= nvcc
 BUILD = build
+INDEX = $(BUILD)/iex-k$(KHOP)-p$(SPH)
 
-all: $(BUILD)/paper $(BUILD)/qgpu $(BUILD)/ifrt$(PP)
+all: $(BUILD)/paper $(BUILD)/qgpu $(INDEX)
 
 $(BUILD)/paper: src/paper.cpp
 	mkdir -p $(BUILD)
-	$(CXX) -O2 -o $@ src/paper.cpp
+	$(CXX) -O2 -o $@ $<
 
 $(BUILD)/qgpu: src/q.cu
 	mkdir -p $(BUILD)
-	$(NVCC) -O3 -arch=$(ARCH) -o $@ src/q.cu
+	$(NVCC) -O3 -arch=$(ARCH) -o $@ $<
 
-$(BUILD)/ifrt$(PP): src/ifront.cu
+$(INDEX): src/iex.cu
 	mkdir -p $(BUILD)
-	$(NVCC) -O3 -arch=$(ARCH) -DPP=$(PP) -o $@ src/ifront.cu
+	$(NVCC) -O3 -arch=$(ARCH) -DKHOP=$(KHOP) -DSPH=$(SPH) -o $@ $<
+
+test: all
+	python3 scripts/test_correctness.py --builder $(INDEX) --reader $(BUILD)/paper
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all clean
+.PHONY: all test clean

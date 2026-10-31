@@ -1,127 +1,140 @@
-# GPU acceleration for k-hop reachability on temporal bipartite graphs
+# GPU index construction for k-hop reachability on temporal bipartite graphs
 
-Paper: Zhou, Wang, Tan, Du, Chen, Tang, IP&M 62(5):104178, 2025.
-Machine: h20-230, 1x H20 96GB (sm_90).
+Paper: **Junfeng Zhou, Zuyong Wang, Yuting Tan, Ming Du, Ziyang Chen, Xian Tang**,
+*Efficient processing of k-hop reachability queries on temporal bipartite graphs*,
+Information Processing and Management 62 (2025) 104178.
 
-**Hard requirement met: the GPU index is EXACT - zero false negatives and zero
-false positives, verified query by query against exact BFS on every dataset.**
+Machine: h20-230, 1x H20 96GB (sm_90). CPU numbers are single threaded, matching
+the paper.
 
 ## Files
 
-- `ALGO.md` - the paper algorithms explained from scratch
-
-- `src/paper.cpp` - CPU baseline: graphConvert, onlineQuery (exact BFS),
-  indexBuild+ faithful, plus `cmp` which diffs an index against exact BFS
-
-- `src/iex.cu` - GPU index builder (exact)
-
-- `src/q.cu` - GPU batched query kernel (exact)
+- `src/paper.cpp` - CPU side: graphConvert (Alg.1), onlineQuery (Alg.2), the
+  two index builders, indexQuery (Alg.3), plus `cmp` which diffs an index against
+  exact BFS.
+- `src/iex.cu` - GPU index builder.
+- `src/q.cu` - GPU batched **online** query (not an index query).
+- `scripts/prep.py` - paper preprocessing: power-law (alpha=-2.5) durations in
+  1-48 h, plus query generation.
+- `scripts/test_correctness.py` - independent exhaustive oracle (see below).
 
 ## Build
 
 ```bash
-export TMPDIR=/data1/xuanyiyang/tmp     # / is full on h20-230
+export TMPDIR=/data1/xuanyiyang/tmp      # / is full on h20-230
 export PATH=/data1/xuanyiyang/cuda-13.0/bin:$PATH
 export LD_LIBRARY_PATH=/data1/xuanyiyang/cuda-13.0/lib64
-g++  -O2 -o build/paper src/paper.cpp
-nvcc -O3 -arch=sm_90 -DKHOP=3 -DSPH=128 -o build/iexact3 src/iex.cu
-nvcc -O3 -arch=sm_90 -o build/qgpu src/q.cu
+make            # builds paper, qgpu and iex-k5-p128 (KHOP=5, SPH=128)
+make test       # exhaustive correctness suite
 ```
 
-## Why the earlier GPU version missed answers, and what changed
+## The index
 
-The first GPU builder ran ONE temporal BFS per vertex and kept a bounded Pareto
-set per vertex pair. That can never be exact: Pareto-filtering the faithful index
-removed 0 of 22,683 entries, with up to 240 entries per pair. With three
-objectives (hop, ts, te) almost nothing dominates anything, so the frontier is the
-whole set, and a bounded number of slots always loses a few percent.
+TB2Hop: every vertex has `L_in` and `L_out`, each entry a quadruple
+`(w, t1, t2, k)` meaning "w reaches v inside [t1,t2] in k hops". A query is
+answered by C1/C2/C3 only, with no graph traversal.
 
-The exact builder drops visited-based pruning entirely and explores ALL
-time-respecting paths up to KHOP hops. That set is a superset of anything a
-faithful traversal can produce, so nothing can be missed; and every stored entry
-is a real path, so nothing can be invented. Two things make it fit:
+**The paper builds ONE index with no hop limit** - Algorithms 4 and 5 take only the
+graph as input, so k is a query parameter and every path length is stored.
 
-1. **KHOP = 3.** Queries ask for k <= 3 hops, so no path longer than 3 is ever
-   needed. This cuts state by 4x versus the earlier KHOP = 12.
+Our GPU builder needs a hop bound `KHOP` (compile time) and refuses a runtime k larger
+than it. `KHOP=5` was chosen because the paper's query experiments use k in [1,5].
+The bound is recorded in the index file header and a query with `k > KHOP` exits with
+an error instead of returning a wrong answer.
 
-2. **One Pareto bucket per hop.** Fixing the hop reduces domination to two
-   dimensions (ts, te), which makes each frontier small enough to store
-   completely (SPH = 128 slots per hop; 128 and 256 give identical results, so it
-   has converged).
+## GPU builder design
 
-A device-side compaction kernel then copies back only the non-empty slots instead
-of the whole state array - this alone was a 52x speedup (38.7 s -> 0.75 s on
-wikiquote_pl).
+- Batches of B sources are relaxed together; state is one u64 (start offset, end)
+  per (vertex, hop, slot, query), so consecutive queries of a warp are contiguous.
+- One Pareto frontier **per hop** (`SPH` slots). Fixing the hop reduces domination to
+  two dimensions, which keeps each frontier small.
+- Only nondominated intervals survive, so no answer is lost.
+- **SPH is a capacity, not an accuracy knob.** A batch that overflows doubles its
+  slots and recomputes; if the frontier does not fit in memory the batch is halved;
+  if it still does not fit the program fails and publishes nothing.
+- Output is compacted on the device (count, allocate exactly, emit) - the earlier
+  fixed output pool silently truncated.
+- The index is written to `.partial` and renamed only after every write succeeds.
 
-## Results: exactness (2000 queries, k = 3, vs exact BFS)
+## Correctness
 
-| dataset | index-only (false pos) | online-only (false neg) |
-|---|---|---|
-| linux-kernel | 0 | 0 |
-| wikiquote_pl | 0 | 0 |
-| elwiki | 0 | 0 |
-| dawiki | 0 | 0 |
-| arwiki | 0 | 0 |
-| trwiki | 0 | 0 |
-| zhwiki | 0 | 0 |
-| gowalla | 0 | 0 |
-| frwiki | 0 | 0 |
+Verified by `scripts/test_correctness.py`, an independent oracle that enumerates
+real walks (no share code with either implementation). It compares **every vertex
+pair x every time window x every k** on 16 tiny graphs, at batch 1/3/8:
 
-## Results: index construction
+```
+PASS: 338010 exhaustive query comparisons + 300-interval overflow + invalid input/horizon tests
+```
 
-| dataset | transformed edges | GPU exact | entries | vs CPU faithful |
-|---|---|---|---|---|
-| linux-kernel | 205,611 | **8.64 s** | 8.97M | **5787x** (CPU 49,981 s, measured) |
-| elwiki | 765,013 | **2.08 s** | 1.50M | running |
-| dawiki | 464,830 | **4.67 s** | 2.74M | running |
-| arwiki | 1,383,543 | **10.82 s** | 4.40M | - |
-| trwiki | 998,272 | **11.85 s** | 5.79M | - |
-| zhwiki | 2,164,194 | **26.47 s** | 13.4M | - |
-| gowalla | 1,406,933 | **41.96 s** | 166M | - |
-| frwiki | 3,381,679 | **59.34 s** | 46.5M | - |
+It also checks that labels are real paths, that a 300-interval frontier triggers the
+retry path, and that invalid input / truncated files / k > KHOP fail without touching
+an existing index. `compute-sanitizer memcheck/initcheck`: 0 errors.
 
-The 5787x on linux-kernel is measured end to end (CPU faithful 49,981 s,
-reproduced twice at 49,981 s and 51,148 s). The faithful runs on the wiki
-datasets are still executing in the background; they take days because the
-algorithm is O(|V| x |E|) and single threaded. Scaling the measured
-linux-kernel point by N x M gives estimates of 1.1e4 - 2.4e4 x for those, which
-will be replaced by measured numbers when the runs finish.
+End-to-end on real data, `paper cmp` compares the GPU index against exact BFS per
+query. **0 false positives, 0 false negatives** on elwiki (K=1..5, 100k queries each)
+and linux-kernel (K=3,5, 100k queries).
 
-## Results: query
+Limitation of this evidence: it is verification on these graphs and these queries,
+not a proof for arbitrary inputs.
 
-The batched query kernel answers S queries at once, state `A[vertex * S + query]`,
-one relaxation round per hop. It is exact (identical answers to the CPU
-onlineQuery) and runs at 40-62% of H20 peak bandwidth.
+## Results: elwiki (N=11906, M=765013, B=8)
 
-| dataset | k | S | us/query | queries/s | vs serial CPU |
+| KHOP | build | index size | entries | query (100k) | cmp |
 |---|---|---|---|---|---|
-| twitter | 3 | 1024 | 393.5 | 2,542 | **15.5x** |
-| twitter | 4 | 16384 | 809.1 | 1,236 | **26.3x** |
-| epinions | 3 | 8192 | 73.2 | 13,659 | **69.9x** |
+| 1 | 0.37 s | 1.5 MB | 91,117 | 0.03 us/q | 0/0 |
+| 2 | 2.29 s | 8.2 MB | 527,122 | 0.08 us/q | 0/0 |
+| 3 | 4.32 s | 21 MB | 1,353,276 | 0.22 us/q | 0/0 |
+| 4 | 6.41 s | 36 MB | 2,338,607 | 0.51 us/q | 0/0 |
+| 5 | 8.18 s | 52 MB | 3,356,768 | 0.92 us/q | 0/0 |
 
-At k = 2 the win is only 1.24x on twitter: a single pruned CPU BFS is already
-cheap there, so batching has little to amortise.
+One K=5 index serves k=3 (0.60 us), k=4 (0.76 us) and k=5 (0.92 us); the horizon
+check makes that explicit rather than silently truncating.
 
-## Datasets
+## Results: linux-kernel (N=42045, M=205611, B=16)
 
-The paper uses SNAP (BR, GO) and KONECT wiki edit graphs with durations drawn
-from a power law (alpha = -2.5, 1-48 h). `prep.py` reproduces that
-preprocessing. We obtained gowalla and edit-{zh,el,da,tr,fr,ar}wiki from KONECT.
-Brightkite is still downloading. Note our edge counts differ from the paper
-Table 6 (e.g. zhwiki 1,576,187 vs their 947,552), so absolute times are not
-directly comparable with their Table 7 - only the order of magnitude is.
+| KHOP | build | index size | entries | indexQuery | onlineQuery | cmp |
+|---|---|---|---|---|---|---|
+| 3 | 12.15 s | 139 MB | 9,045,628 | 19.98 us/q | 437.1 us/q | 0/0 |
+| 5 | 26.15 s | 440 MB | 28,768,418 | 174.81 us/q | - | 0/0 |
+
+indexQuery is 22x faster than exact BFS at K=3, far short of the paper's "three
+orders of magnitude". That is our `indexQuery` implementation, not the paper's: it
+scans `L_out(s) x L_in(t)` as a nested loop instead of grouping entries by shared
+vertex as Algorithm 3 does. At K=5 the index is 3x larger and the naive scan costs
+9x more, which is exactly the quadratic term. Optimising it is the obvious next step.
+
+## Results: GPU online query (`src/q.cu`)
+
+This is a batched re-implementation of Algorithm 2, not an index query. Earlier
+measurements (before the correctness hardening) were twitter k=3 15.5x and k=4
+26.3x, epinions k=3 69.9x against a single-threaded CPU. **Those numbers are stale**:
+the hardened kernel uses a wider arrival type, so it must be re-benchmarked before
+being quoted.
+
+## What was withdrawn
+
+An earlier README claimed 5787x on linux-kernel. That compared the GPU against
+`paper.cpp`'s `idump2`, which turns out not to be the paper's Algorithm 5:
+
+- it never runs the combined-dominance test (Alg.4 line 30 / Alg.5 line 12), so its
+  index is a superset and its build time is not the paper's;
+- its visited stamp is reused across different hubs, which can make a later hub skip
+  an edge an earlier hub had marked. An 8-vertex graph reproduces this: the CPU index
+  misses one reachable query where the GPU index answers it.
+
+So the CPU baseline is an approximation of the paper, and no speedup should be
+quoted against it. A faithful implementation is required before any such number is
+published.
 
 ## Known limits
 
-- state is N x B x KHOP x SPH x 8 bytes; vertex counts above ~200k would force
-  an even smaller batch.
-
-- index update (Algorithms 6/7) and the combined-dominance pass (Algorithm 4
-  line 30) are not implemented.
-
-- speedups are against a single-threaded CPU, matching the paper. A
-  multi-process CPU baseline would narrow them.
-
-- On very small graphs the GPU is starved; wikiquote_pl (4,154 edges) is only
-  ~1.5x faster than the CPU despite being exact.
-
+- `k > KHOP` is refused, not approximated. The paper has no such limit.
+- Index size grows quickly with KHOP (elwiki: 1.5 MB at K=1 to 52 MB at K=5), so does
+  build time; a paper-equivalent unbounded build is not implemented.
+- indexQuery is the naive nested loop described above.
+- Index update (Algorithms 6/7) is not implemented.
+- Datasets are KONECT/SNAP with paper-style durations. Our edge counts differ from
+  the paper's Table 6 (e.g. zhwiki 1,576,187 vs their 947,552), so absolute times are
+  not comparable with their Table 7 - only the trend is.
+- Build state is N x KHOP x SPH x B x 8 bytes; on a shared GPU the batch shrinks
+  automatically, which costs speed.

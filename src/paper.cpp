@@ -135,9 +135,12 @@ static bool onlineQuery(const CSR& c, u32 s, u32 t, u32 ts, u32 te, u32 k,
 
 struct Ent { u32 w, t1, t2, k; };
 static std::vector<std::vector<Ent>> Lin, Lout;
+static u32 indexMaxHop = NONE;
 
 // Algorithm 3: indexQuery, conditions C1 / C2 / C3
 static bool indexQuery(u32 s, u32 t, u32 ts, u32 te, u32 k) {
+  if (k > indexMaxHop) { P("query k exceeds index horizon %u", indexMaxHop); exit(1); }
+  if (s >= Lin.size() || t >= Lin.size() || ts > te) { P("invalid query"); exit(1); }
   if (s == t) return true;
   for (const Ent& e : Lout[s])
     if (e.w == t && ts <= e.t1 && e.t2 <= te && e.k <= k) return true;
@@ -317,14 +320,32 @@ static void writeIdx(u32 n, const char* p) {
 static void readIdx(const char* p, u32& n) {
   FILE* f = fopen(p, "rb");
   if (!f) { P("cannot open index"); exit(1); }
-  fread(&n, 4, 1, f);
-  Lin.assign(n, std::vector<Ent>()); Lout.assign(n, std::vector<Ent>());
-  for (u32 v = 0; v < n; v++) {
-    u32 c = 0; fread(&c, 4, 1, f); Lin[v].resize(c);
-    fread(Lin[v].data(), sizeof(Ent), c, f);
-    fread(&c, 4, 1, f); Lout[v].resize(c);
-    fread(Lout[v].data(), sizeof(Ent), c, f);
+  fseek(f, 0, SEEK_END); long length = ftell(f); rewind(f);
+  auto checkedRead = [&](void* dest, size_t size, size_t count) {
+    if (fread(dest, size, count, f) != count) { P("truncated index"); exit(1); }
+  };
+  checkedRead(&n, 4, 1);
+  indexMaxHop = NONE;
+  if (n == NONE) {
+    u32 version;
+    checkedRead(&version, 4, 1); checkedRead(&n, 4, 1); checkedRead(&indexMaxHop, 4, 1);
+    if (version != 1 || !indexMaxHop || indexMaxHop == NONE) {
+      P("unsupported index header"); exit(1);
+    }
   }
+  if (!n || n == NONE || length < 0 || (u64)n * 8 > (u64)length) {
+    P("invalid index size"); exit(1);
+  }
+  Lin.assign(n, std::vector<Ent>()); Lout.assign(n, std::vector<Ent>());
+  for (u32 v = 0; v < n; v++) for (auto* list : {&Lin[v], &Lout[v]}) {
+    u32 c; checkedRead(&c, 4, 1);
+    if ((u64)c * sizeof(Ent) > (u64)(length - ftell(f))) { P("truncated labels"); exit(1); }
+    list->resize(c); checkedRead(list->data(), sizeof(Ent), c);
+    for (const Ent& e : *list) if (e.w >= n || e.t1 >= e.t2 || !e.k || e.k > indexMaxHop) {
+      P("invalid label"); exit(1);
+    }
+  }
+  if (ftell(f) != length) { P("trailing index data"); exit(1); }
   fclose(f);
 }
 
@@ -359,6 +380,7 @@ int main(int argc, char** argv) {
     CSR c = build_csr(t);
     std::vector<u32> qs, qt, qa, qb;
     FILE* f = fopen(argv[3], "rb");
+    if (!f) { P("cannot open queries"); return 1; }
     u32 a, b, s, e;
     while (fscanf(f, "%u %u %u %u", &a, &b, &s, &e) == 4) {
       qs.push_back(a); qt.push_back(b);
@@ -397,9 +419,11 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (mode == "iquery") {
+    if (argc < 4) { P("iquery needs index and query file"); return 1; }
     u32 n = 0; readIdx(path.c_str(), n);
     std::vector<u32> qs, qt, qa, qb;
     FILE* f = fopen(argv[3], "rb");
+    if (!f) { P("cannot open queries"); return 1; }
     u32 a, b, s2, e2;
     while (fscanf(f, "%u %u %u %u", &a, &b, &s2, &e2) == 4) {
       qs.push_back(a); qt.push_back(b);
@@ -507,12 +531,15 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (mode == "cmp") {
+    if (argc < 5) { P("cmp needs index, graph and query file"); return 1; }
     u32 n = 0; readIdx(path.c_str(), n);
     std::string tgf = argc > 3 ? argv[3] : "";
     TG t = loadTG(tgf);
+    if (t.n != n) { P("graph/index vertex count mismatch"); return 1; }
     CSR c = build_csr(t);
     std::vector<u32> qs, qt, qa, qb;
     FILE* f = fopen(argv[4], "rb");
+    if (!f) { P("cannot open queries"); return 1; }
     u32 a, b, s2, e2;
     while (fscanf(f, "%u %u %u %u", &a, &b, &s2, &e2) == 4) {
       qs.push_back(a); qt.push_back(b);
@@ -535,35 +562,7 @@ int main(int argc, char** argv) {
     P("[cmp] N=%u q=%zu k=%u  both=%llu  index-only=%llu  online-only=%llu",
       n, qs.size(), k, (unsigned long long)both,
       (unsigned long long)idxOnly, (unsigned long long)onlOnly);
-    return 0;
-  }
-  if (mode == "cmp") {
-    u32 n = 0; readIdx(path.c_str(), n);
-    std::string tgf = argc > 3 ? argv[3] : "";
-    TG t = loadTG(tgf);
-    CSR c = build_csr(t);
-    std::vector<u32> qs, qt, qa, qb;
-    FILE* f = fopen(argv[4], "rb");
-    u32 a, b, s2, e2;
-    while (fscanf(f, "%u %u %u %u", &a, &b, &s2, &e2) == 4) {
-      qs.push_back(a); qt.push_back(b);
-      if (s2 <= e2) { qa.push_back(s2); qb.push_back(e2); } else { qa.push_back(e2); qb.push_back(s2); }
-    }
-    fclose(f);
-    u32 k = argc > 5 ? atoi(argv[5]) : 3;
-    int nq = argc > 6 ? atoi(argv[6]) : 0;
-    if (nq > 0 && nq < (int)qs.size()) { qs.resize(nq); qt.resize(nq); qa.resize(nq); qb.resize(nq); }
-    std::vector<u32> cur(t.n, NONE), nxt(t.n, NONE), fr, nf;
-    u64 both = 0, idxOnly = 0, onlOnly = 0;
-    for (size_t i = 0; i < qs.size(); i++) {
-      bool A = indexQuery(qs[i], qt[i], qa[i], qb[i], k);
-      bool B = onlineQuery(c, qs[i], qt[i], qa[i], qb[i], k, cur, nxt, fr, nf);
-      std::fill(cur.begin(), cur.end(), NONE);
-      if (A && B) both++; else if (A && !B) idxOnly++; else if (!A && B) onlOnly++;
-    }
-    P("[cmp] N=%u q=%zu k=%u  both=%llu  index-only=%llu  online-only=%llu",
-      n, qs.size(), k, (unsigned long long)both, (unsigned long long)idxOnly, (unsigned long long)onlOnly);
-    return 0;
+    return (idxOnly || onlOnly) ? 2 : 0;
   }
   P("usage: paper convert|build|idump|analyze|pfilt|cmp|iquery|online <file> [args]");
   return 1;
