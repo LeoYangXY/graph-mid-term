@@ -139,7 +139,9 @@ static u32 indexMaxHop = NONE;
 
 // Algorithm 3: indexQuery, conditions C1 / C2 / C3
 static bool indexQuery(u32 s, u32 t, u32 ts, u32 te, u32 k) {
-  if (k > indexMaxHop) { P("query k exceeds index horizon %u", indexMaxHop); exit(1); }
+  if (indexMaxHop && k > indexMaxHop) {
+    P("query k exceeds index horizon %u", indexMaxHop); exit(1);
+  }
   if (s >= Lin.size() || t >= Lin.size() || ts > te) { P("invalid query"); exit(1); }
   if (s == t) return true;
   for (const Ent& e : Lout[s])
@@ -301,6 +303,7 @@ static void indexBuildPlus(const CSR& c, u32 n) {
 //     fails the time test cannot block a later valid one.
 static std::vector<u32> tokArr;
 static u32 gTok = 0;
+static u32 gMaxK = 0;   // deepest hop actually stored
 
 template <bool FWD>
 static void alg5Pass(const CSR& c, u32 u, u32 seed, u32 tok) {
@@ -314,6 +317,7 @@ static void alg5Pass(const CSR& c, u32 u, u32 seed, u32 tok) {
     if (covered) continue;
     if (FWD) Lin[s.v].push_back(Ent{u, s.ts, s.te, s.k});
     else     Lout[s.v].push_back(Ent{u, s.ts, s.te, s.k});
+    if (s.k > gMaxK) gMaxK = s.k;
     for (u32 e = c.off[s.v]; e < c.off[s.v + 1]; e++) {
       if (tokArr[e] == tok) continue;
       u32 y = c.dst[e];
@@ -323,6 +327,59 @@ static void alg5Pass(const CSR& c, u32 u, u32 seed, u32 tok) {
       else     { if (t2 <= s.ts) { tokArr[e] = tok; pq.push(St{y, t1, s.te, s.k + 1}); } }
     }
   }
+}
+
+// Probe only: how deep does the unbounded traversal actually go on this graph?
+// Same rank restriction and time rule as the builders, but no label storage and
+// no dominance checks, so it is a small fraction of the build cost.
+static void probeDepth(const CSR& c, u32 n) {
+  std::vector<u32> ord2(n), vs(n), deg(n);
+  for (u32 i = 0; i < n; i++) { vs[i] = i; deg[i] = c.off[i + 1] - c.off[i]; }
+  std::sort(vs.begin(), vs.end(), [&](u32 a, u32 b) {
+    if (deg[a] != deg[b]) return deg[a] > deg[b];
+    return a < b;
+  });
+  for (u32 r = 0; r < n; r++) ord2[vs[r]] = r;
+  std::vector<u32> tok(c.off[n], 0);
+  u32 t = 0, bestK = 0, bestHub = NONE;
+  std::vector<u32> cur, nxt;
+  u64 visitedEdges = 0;
+  for (u32 r = 0; r < n; r++) {
+    u32 u = vs[r];
+    u32 hubMax = 0;
+    for (u32 p = c.off[u]; p < c.off[u + 1]; p++) {
+      if (ord2[c.dst[p]] <= ord2[u]) continue;
+      ++t;
+      tok[p] = t;
+      cur.assign(1, p);            // edge index
+      u32 depth = 1;
+      std::vector<u32> front = {p};
+      while (!front.empty()) {
+        nxt.clear();
+        for (u32 e : front) {
+          u32 v = c.dst[e], te = c.tb[e];
+          ++visitedEdges;
+          for (u32 q = c.off[v]; q < c.off[v + 1]; q++) {
+            if (tok[q] == t) continue;
+            u32 y = c.dst[q];
+            if (ord2[y] <= ord2[u]) continue;
+            if (c.ta[q] >= te) { tok[q] = t; nxt.push_back(q); }
+          }
+        }
+        if (nxt.empty()) break;
+        ++depth;
+        front.swap(nxt);
+      }
+      if (depth > hubMax) hubMax = depth;
+    }
+    if (hubMax > bestK) { bestK = hubMax; bestHub = u; }
+    if ((r & 31) == 0) {
+      P("  probe %u / %u (%.1f pct) maxDepth=%u hub=%u", r, n, 100.0 * r / n, bestK, bestHub);
+      fflush(stdout);
+    }
+  }
+  P("[probe] N=%u M=%llu maxDepth=%u atHub=%u visitedEdges=%llu",
+    n, (unsigned long long)c.m, bestK, bestHub, (unsigned long long)visitedEdges);
 }
 
 static void indexBuildPlus5(const CSR& c, u32 n) {
@@ -347,7 +404,13 @@ static void indexBuildPlus5(const CSR& c, u32 n) {
       return a < b;
     });
     for (u32 p : seeds) { alg5Pass<true>(c, u, p, ++gTok); alg5Pass<false>(c, u, p, ++gTok); }
-    if ((r & 255) == 0) P("  alg5 %u / %u (%.1f pct)", r, n, 100.0 * r / n);
+    if ((r & 63) == 0) {
+      u64 e = 0;
+      for (u32 v = 0; v < n; ++v) e += Lin[v].size() + Lout[v].size();
+      P("  alg5 %u / %u (%.1f pct) maxK=%u entries=%llu", r, n, 100.0 * r / n,
+        gMaxK, (unsigned long long)e);
+      fflush(stdout);
+    }
   }
 }
 
@@ -392,7 +455,7 @@ static void readIdx(const char* p, u32& n) {
   if (n == NONE) {
     u32 version;
     checkedRead(&version, 4, 1); checkedRead(&n, 4, 1); checkedRead(&indexMaxHop, 4, 1);
-    if (version != 1 || !indexMaxHop || indexMaxHop == NONE) {
+    if (version != 1 || indexMaxHop == NONE) {   // horizon 0 means "complete"
       P("unsupported index header"); exit(1);
     }
   }
@@ -404,7 +467,8 @@ static void readIdx(const char* p, u32& n) {
     u32 c; checkedRead(&c, 4, 1);
     if ((u64)c * sizeof(Ent) > (u64)(length - ftell(f))) { P("truncated labels"); exit(1); }
     list->resize(c); checkedRead(list->data(), sizeof(Ent), c);
-    for (const Ent& e : *list) if (e.w >= n || e.t1 >= e.t2 || !e.k || e.k > indexMaxHop) {
+    for (const Ent& e : *list)
+      if (e.w >= n || e.t1 >= e.t2 || !e.k || (indexMaxHop && e.k > indexMaxHop)) {
       P("invalid label"); exit(1);
     }
   }
@@ -467,6 +531,16 @@ int main(int argc, char** argv) {
     double el = now_s() - t0;
     P("[onlineQuery] N=%u M=%llu k=%u q=%zu  total=%.4f s  per-query=%.1f us  positive=%zu",
       t.n, (unsigned long long)t.m(), k, qs.size(), el, el * 1e6 / qs.size(), pos);
+    return 0;
+  }
+  if (mode == "probe") {
+    TB g = load(path);
+    TG t = graphConvert(g);
+    CSR c = build_csr(t);
+    P("[probe] |V|=%u |E|=%llu", t.n, (unsigned long long)t.m());
+    double t0 = now_s();
+    probeDepth(c, t.n);
+    P("[probe] time=%.3f s", now_s() - t0);
     return 0;
   }
   if (mode == "idump" || mode == "idump2" || mode == "idump3") {
