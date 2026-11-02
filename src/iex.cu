@@ -11,6 +11,17 @@
 // Invariant: both hop buffers are empty when a batch starts. Every frontier is
 // cleared exactly once, after the hop that produced it has been consumed, so no
 // per-batch memset of the whole array is needed.
+//
+// Kernels, one per hop state transition (a kernel boundary is the only place
+// where all blocks are guaranteed to have finished the previous hop):
+//   seedFirstHop     hop 1, walked straight out of the source vertex
+//   expandHop        hop h, from the hop h-1 buffers into the hop h buffers
+//   flushLabels      copy one hop buffer into the host record stream
+//   clearHopBuffer   release the cells of a hop that has been consumed
+//   resetSlotCount   zero the per-(vertex,source) slot count of that hop
+// Helpers: windowDominates (Pareto test on (start,end)),
+//          mergeTimeWindow (concurrent insert of one window),
+//          pushToNextFrontier (deduplicated append of a (vertex,source) pair).
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
@@ -50,19 +61,19 @@ static u32 count(const char* s) {   // like number(), but 0 is legal
 static double now() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-__device__ __forceinline__ bool dom(u64 a, u64 b) {
+__device__ __forceinline__ bool windowDominates(u64 a, u64 b) {
   return (u32)(a >> 32) <= (u32)(b >> 32) && (u32)a <= (u32)b;
 }
 // A replacement always dominates what it replaces, so a witnessed dominator stays
 // valid across concurrent updates, and a full scan with no dominator means the
 // frontier really is full.
-__device__ __forceinline__ bool insert(u64* base, u32 stride, u32 cap, u64 candidate, u32* overflow, u32* slotOut = nullptr) {
+__device__ __forceinline__ bool mergeTimeWindow(u64* base, u32 stride, u32 cap, u64 candidate, u32* overflow, u32* slotOut = nullptr) {
   for (u32 i = 0; i < cap; ++i) {
     u64* cell = base + (u64)i * stride;
     u64 old = atomicCAS(cell, EMPTY, EMPTY);
     for (;;) {
-      if (old != EMPTY && dom(old, candidate)) return false;
-      if (old != EMPTY && !dom(candidate, old)) break;
+      if (old != EMPTY && windowDominates(old, candidate)) return false;
+      if (old != EMPTY && !windowDominates(candidate, old)) break;
       u64 observed = atomicCAS(cell, old, candidate);
       if (observed == old) return true;
       old = observed;
@@ -72,8 +83,8 @@ __device__ __forceinline__ bool insert(u64* base, u32 stride, u32 cap, u64 candi
   return false;
 }
 // generation tag replaces "was this cell cleared": no memset per hop
-__device__ __forceinline__ void touch(u32 v, u32 q, u32 B, u32* mark, u32 gen,
-                                      u32* nV, u32* nQ, u32* nCnt) {
+__device__ __forceinline__ void pushToNextFrontier(u32 v, u32 q, u32 B, u32* mark, u32 gen,
+                                                   u32* nV, u32* nQ, u32* nCnt) {
   u64 idx = (u64)v * B + q;
   if (atomicExch(&mark[idx], gen) != gen) {
     u32 i = atomicAdd(nCnt, 1u);
@@ -81,7 +92,7 @@ __device__ __forceinline__ void touch(u32 v, u32 q, u32 B, u32* mark, u32 gen,
   }
 }
 
-__global__ void seed(const u32* src, const u32* off, const u32* dst, const u32* ta,
+__global__ void seedFirstHop(const u32* src, const u32* off, const u32* dst, const u32* ta,
                      const u32* tb, const u32* rank, u64* st, u32 B, u32 P, u32 top,
                      u32 gen, u32* fV, u32* fQ, u32* fCnt, u32* mark, u32* overflow,
                      u32* sc) {
@@ -93,14 +104,14 @@ __global__ void seed(const u32* src, const u32* off, const u32* dst, const u32* 
     if (rank[v] <= rank[u]) continue;
     u64 c = ((u64)(top - ta[e]) << 32) | tb[e];
     u32 slot;
-    if (insert(st + (u64)v * P * B + q, B, P, c, overflow, &slot)) {
-      touch(v, q, B, mark, gen, fV, fQ, fCnt);
+    if (mergeTimeWindow(st + (u64)v * P * B + q, B, P, c, overflow, &slot)) {
+      pushToNextFrontier(v, q, B, mark, gen, fV, fQ, fCnt);
       atomicMax(&sc[(u64)v * B + q], slot + 1);
     }
   }
 }
 // expand the frontier over its out-edges; this replaces the full-edge scan
-__global__ void relax(const u32* off, const u32* dst, const u32* ta, const u32* tb,
+__global__ void expandHop(const u32* off, const u32* dst, const u32* ta, const u32* tb,
                       const u32* rank, const u32* src, const u64* from, u64* to,
                       const u32* fV, const u32* fQ, const u32* fCnt,
                       u32* nV, u32* nQ, u32* nCnt, u32* mark, u32 gen,
@@ -128,19 +139,19 @@ __global__ void relax(const u32* off, const u32* dst, const u32* ta, const u32* 
         c = ((u64)(top - ta[e]) << 32) | end;
       }
       u32 slot;
-      if (insert(to + (u64)y * P * B + q, B, P, c, overflow, &slot)) {
-        touch(y, q, B, mark, gen, nV, nQ, nCnt);
+      if (mergeTimeWindow(to + (u64)y * P * B + q, B, P, c, overflow, &slot)) {
+        pushToNextFrontier(y, q, B, mark, gen, nV, nQ, nCnt);
         atomicMax(&scTo[(u64)y * B + q], slot + 1);
       }
     }
   }
 }
-__global__ void resetSc(u32* sc, const u32* fV, const u32* fQ, const u32* fCnt, u32 B) {
+__global__ void resetSlotCount(u32* sc, const u32* fV, const u32* fQ, const u32* fCnt, u32 B) {
   for (u32 i = (u32)((u64)blockIdx.x * blockDim.x + threadIdx.x); i < *fCnt;
        i += gridDim.x * blockDim.x)
     sc[(u64)fV[i] * B + fQ[i]] = 0;
 }
-__global__ void emit(const u64* st, const u32* fV, const u32* fQ, const u32* fCnt,
+__global__ void flushLabels(const u64* st, const u32* fV, const u32* fQ, const u32* fCnt,
                      u32 B, u32 P, u32 top, u32 hop, Record* out, u64* count, u64 cap,
                      const u32* sc) {
   u64 total = (u64)(*fCnt) * P;
@@ -154,7 +165,7 @@ __global__ void emit(const u64* st, const u32* fV, const u32* fQ, const u32* fCn
     if (ix < cap) out[ix] = Record{fV[item], fQ[item], hop, top - (u32)(a >> 32), (u32)a};
   }
 }
-__global__ void clearCells(u64* st, const u32* fV, const u32* fQ, const u32* fCnt, u32 B, u32 P, u32* sc) {
+__global__ void clearHopBuffer(u64* st, const u32* fV, const u32* fQ, const u32* fCnt, u32 B, u32 P, u32* sc) {
   u64 total = (u64)(*fCnt) * P;
   for (u64 i = (u64)blockIdx.x * blockDim.x + threadIdx.x; i < total;
        i += (u64)gridDim.x * blockDim.x) {
@@ -297,19 +308,19 @@ int main(int argc, char** argv) {
         int cur = 0, nxt = 1;
         u32 s1 = 1 % 3;
         CK(cudaMemset(fC[s1], 0, 4));
-        seed<<<dim3(32, nb), 256>>>(dsrc, doff, ddst, dta, dtb, drank, buf[cur], nb, P, top,
+        seedFirstHop<<<dim3(32, nb), 256>>>(dsrc, doff, ddst, dta, dtb, drank, buf[cur], nb, P, top,
                                     ++gen, fV[s1], fQ[s1], fC[s1], mark, overflow, sc[cur]);
         CK(cudaGetLastError());
         CK(cudaMemset(recCnt, 0, 8));
         if (M0) {
-          emit<<<2048, 256>>>(buf[cur], fV[s1], fQ[s1], fC[s1], nb, P, top, 1, rec, recCnt, cap, sc[cur]);
+          flushLabels<<<2048, 256>>>(buf[cur], fV[s1], fQ[s1], fC[s1], nb, P, top, 1, rec, recCnt, cap, sc[cur]);
           CK(cudaGetLastError());
         }
         hopsDone = 1;
         for (u32 h = 2; h <= K && M0; ++h) {
           u32 rs = (h - 1) % 3, ws = h % 3;  // read hop h-1, write hop h
           CK(cudaMemset(fC[ws], 0, 4));
-          relax<<<8192, 256>>>(doff, ddst, dta, dtb, drank, dsrc, buf[cur], buf[nxt],
+          expandHop<<<8192, 256>>>(doff, ddst, dta, dtb, drank, dsrc, buf[cur], buf[nxt],
                                fV[rs], fQ[rs], fC[rs], fV[ws], fQ[ws], fC[ws], mark, ++gen,
                                nb, P, top, dir, overflow, sc[cur], sc[nxt]);
           CK(cudaGetLastError());
@@ -318,17 +329,17 @@ int main(int argc, char** argv) {
             if (got2 == 0) break;
           }
           hopsDone = h;
-          emit<<<2048, 256>>>(buf[nxt], fV[ws], fQ[ws], fC[ws], nb, P, top, h, rec, recCnt, cap, sc[nxt]);
+          flushLabels<<<2048, 256>>>(buf[nxt], fV[ws], fQ[ws], fC[ws], nb, P, top, h, rec, recCnt, cap, sc[nxt]);
           CK(cudaGetLastError());
-          clearCells<<<2048, 256>>>(buf[cur], fV[rs], fQ[rs], fC[rs], nb, P, sc[cur]);
-          resetSc<<<256, 256>>>(sc[cur], fV[rs], fQ[rs], fC[rs], nb);
+          clearHopBuffer<<<2048, 256>>>(buf[cur], fV[rs], fQ[rs], fC[rs], nb, P, sc[cur]);
+          resetSlotCount<<<256, 256>>>(sc[cur], fV[rs], fQ[rs], fC[rs], nb);
           CK(cudaGetLastError());
           std::swap(cur, nxt);
         }
         if (M0) { // last hop is still resident: clear it so the buffers are empty again
           u32 ls = hopsDone % 3;
-          clearCells<<<2048, 256>>>(buf[cur], fV[ls], fQ[ls], fC[ls], nb, P, sc[cur]);
-          resetSc<<<256, 256>>>(sc[cur], fV[ls], fQ[ls], fC[ls], nb);
+          clearHopBuffer<<<2048, 256>>>(buf[cur], fV[ls], fQ[ls], fC[ls], nb, P, sc[cur]);
+          resetSlotCount<<<256, 256>>>(sc[cur], fV[ls], fQ[ls], fC[ls], nb);
           CK(cudaGetLastError());
         }
         CK(cudaDeviceSynchronize());
